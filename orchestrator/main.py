@@ -1,14 +1,16 @@
 """
-VEXORA Orchestrator — FastAPI Entry Point (V2)
+VEXORA Orchestrator — FastAPI Entry Point (V3)
 
-The brain of VEXORA Intelligence.
+The brain of VEXORA Intelligence — Adaptive Intelligence Engine.
 
-V2 Architecture:
-    User → Planner LLM → Plan Validator → DAG Builder → Executor → Verifier → Humanizer → Response
+V3 Architecture:
+    User → Planner → Capability Resolver → Registries → Execution Context Builder
+        → DAG Builder → Executor (with Memory) → Combiner → Verifier
+        → Humanizer → Trust Engine → Metrics → Response
 
 Endpoints:
     POST /api/orchestrate       — Full execution (JSON response)
-    GET  /api/orchestrate/stream — SSE streaming execution
+    POST /api/orchestrate/stream — SSE streaming execution
     POST /api/plan              — Dry-run: returns only the execution plan
     GET  /api/agents            — Lists all available Ruflo agents
     GET  /api/models            — Lists all registered models
@@ -20,6 +22,9 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
+import asyncio
+from typing import Optional, Any
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,16 +37,22 @@ from pydantic import BaseModel
 # Load shared .env from workspace root
 env_path = Path(__file__).resolve().parent.parent / ".env"
 if env_path.exists():
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
 else:
-    load_dotenv()
+    load_dotenv(override=True)
 
-from brain.planner import generate_plan, ExecutionPlan
+# V3 imports
+from brain.planner import generate_plan, PlanOutput
+from brain.capability_resolver import resolve_capabilities, ResolvedRequirements
+from brain.execution_context_builder import build_execution_context, ExecutionContext
 from brain.dag_builder import build_dag_from_plan, ExecutionDAG
 from brain.executor import execute_dag, dry_run_dag, ExecutionResult, AgentResult
+from brain.combiner import combine_contracts, parse_agent_output, AgentContract, CombinedDraft
 from brain.verifier import verify, VerificationResult
 from brain.humanizer import humanize, humanize_plan, HumanizedOutput
-from brain.confidence_engine import compute_confidence, ConfidenceResult
+from brain.confidence_engine import compute_trust, TrustAssessment
+from brain.metrics_engine import PipelineMetrics, AgentMetric, PhaseTimer
+from brain.memory_manager import ExecutionMemory, get_or_create_session
 from brain.research_engine import search_web, format_sources_for_prompt
 from brain.agent_registry import list_all_agents, AGENTS, get_agent
 from brain.model_registry import MODELS, list_all_capabilities
@@ -62,10 +73,10 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="VEXORA Intelligence Orchestrator", 
+    title="VEXORA Intelligence Orchestrator",
     lifespan=lifespan,
-    description="The brain of VEXORA Intelligence — AI orchestration engine V2",
-    version="2.0.0",
+    description="The brain of VEXORA Intelligence — Adaptive Intelligence Engine V3",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -85,58 +96,136 @@ class PromptRequest(BaseModel):
     prompt: str
     dry_run: bool = False
     expert_mode: bool = False
+    session_id: str | None = None
 
 
 class OrchestrateResponse(BaseModel):
     success: bool
-    answer: str                        # Humanized final text
-    response: str                      # Legacy/raw (kept for backwards compat)
-    execution: list[dict] = []         # Execution footer metadata
+    answer: str
+    response: str                      # Legacy compat
+    execution: list[dict] = []
     verification: dict | None = None
-    confidence: int | None = None      # 0-100 score
+    confidence: int | None = None
     planning_path: str = "primary"
-    
-    # Old fields for compat
+    trust_factors: list[dict] = []
+    memory_stats: dict | None = None
+    metrics: dict | None = None
+
+    # Compat
     plan: dict | None = None
     agents_used: list[dict] = []
     duration_ms: int = 0
 
 
 # =============================================================================
-# Core Orchestration Logic
+# V3 Core Orchestration Pipeline
 # =============================================================================
 
-async def _run_orchestration(prompt: str, on_event=None) -> dict:
+async def _run_orchestration(prompt: str, on_event=None, session_id: str | None = None) -> dict:
     """
-    Core orchestration pipeline:
-    Planner → DAG → Execute → Verify → Humanize → Confidence
+    V3 Orchestration Pipeline:
+    Planner → Capability Resolver → Execution Context Builder →
+    DAG → Executor (with Memory) → Combiner → Verifier →
+    Humanizer → Trust Engine → Metrics → Response
     """
+    metrics = PipelineMetrics()
     total_start = time.monotonic()
 
-    # 1. PLANNING — Adaptive LLM planner
+    # --- Session Memory ---
+    session = get_or_create_session(session_id)
+
+    # =========================================================================
+    # 1. PLANNING — Pure intent analysis
+    # =========================================================================
     if on_event:
         await on_event({"type": "phase", "phase": "planning", "message": "Analyzing request..."})
 
-    plan = await generate_plan(prompt)
+    with PhaseTimer() as plan_timer:
+        plan = await generate_plan(prompt)
+    metrics.planning_latency_ms = plan_timer.elapsed_ms
+    metrics.planning_path = plan.planning_path
+
+    # Handle clarification loop
+    if plan.needs_clarification and plan.clarification_questions:
+        return {
+            "success": True,
+            "answer": "I need a bit more information to give you the best answer:\n\n" +
+                      "\n".join(f"- {q}" for q in plan.clarification_questions),
+            "response": "",
+            "execution": [],
+            "verification_footer": {"layer1": "skipped", "layer2": "skipped"},
+            "confidence_score": 50,
+            "planning_path": plan.planning_path,
+            "trust_factors": [],
+            "memory_stats": None,
+            "metrics": None,
+            "plan": {"intent": plan.intent, "complexity": plan.complexity, "capabilities": plan.capabilities},
+            "agents_used": [],
+            "duration_ms": plan_timer.elapsed_ms,
+            "needs_clarification": True,
+            "clarification_questions": plan.clarification_questions,
+        }
 
     if on_event:
         await on_event({
             "type": "plan_ready",
             "intent": plan.intent,
             "complexity": plan.complexity,
-            "agents": plan.agents,
+            "capabilities": plan.capabilities,
             "confidence": plan.confidence,
             "reasoning": plan.reasoning,
         })
 
     is_simple_chat = plan.complexity == 0
 
-    # 2. RESEARCH — If research capability is needed
+    # =========================================================================
+    # 2. CAPABILITY RESOLUTION
+    # =========================================================================
+    if on_event:
+        await on_event({"type": "phase", "phase": "resolving", "message": "Resolving capabilities..."})
+
+    with PhaseTimer() as resolve_timer:
+        requirements = resolve_capabilities(plan.capabilities, plan.complexity)
+    metrics.resolution_latency_ms = resolve_timer.elapsed_ms
+
+    # =========================================================================
+    # 3. EXECUTION CONTEXT BUILDING
+    # =========================================================================
+    exec_context = build_execution_context(
+        task=prompt,
+        intent=plan.intent,
+        complexity=plan.complexity,
+        requirements=requirements,
+        conversation_memory=session,
+        planning_path=plan.planning_path,
+    )
+
+    # Inject user constraints into execution memory
+    for constraint in plan.constraints:
+        exec_context.execution_memory.add_fact(
+            agent="planner",
+            statement=constraint,
+            source="user",
+        )
+
+    # =========================================================================
+    # 4. RESEARCH (if needed)
+    # =========================================================================
     research_data = None
-    if "researcher" in plan.agents and not is_simple_chat:
+    has_research = "research" in plan.capabilities and not is_simple_chat
+
+    if has_research:
         if on_event:
             await on_event({"type": "phase", "phase": "research", "message": "Searching the web..."})
         research_data = await search_web(prompt)
+        if research_data.get("success") and research_data.get("results"):
+            for r in research_data["results"]:
+                exec_context.execution_memory.add_fact(
+                    agent="researcher",
+                    statement=f"{r['title']}: {r['snippet'][:150]}",
+                    source="research",
+                    confidence=0.8,
+                )
         if on_event:
             await on_event({
                 "type": "research_complete",
@@ -144,76 +233,174 @@ async def _run_orchestration(prompt: str, on_event=None) -> dict:
                 "success": research_data.get("success", False),
             })
 
-    # 3. BUILD DAG
-    dag = build_dag_from_plan(plan)
+    # =========================================================================
+    # 5. BUILD DAG from Execution Context
+    # =========================================================================
+    dag = _build_dag_from_context(exec_context)
 
-    # 4. EXECUTE DAG
+    # =========================================================================
+    # 6. EXECUTE DAG
+    # =========================================================================
     if on_event:
         await on_event({"type": "phase", "phase": "executing", "message": "Executing agents..."})
 
-    # Augment task with research context if available
     execution_task = prompt
     if research_data:
         execution_task = prompt + "\n\n" + format_sources_for_prompt(research_data)
 
-    execution_result = await execute_dag(dag, execution_task, on_event=on_event, retry_budget={"planning": 2, "execution": 2})
+    # Inject shared memory context
+    memory_context = exec_context.execution_memory.to_context_prompt()
+    if memory_context:
+        execution_task = execution_task + "\n\n" + memory_context
 
-    # 5. VERIFY (skip for Level 0)
-    if not is_simple_chat and plan.verification:
-        if on_event:
-            await on_event({"type": "phase", "phase": "verifying", "message": "Verifying output..."})
+    with PhaseTimer() as exec_timer:
+        execution_result = await execute_dag(
+            dag, execution_task, on_event=on_event,
+            retry_budget={"planning": 2, "execution": 2}
+        )
+    metrics.execution_latency_ms = exec_timer.elapsed_ms
+    metrics.agents_executed = execution_result.agents_executed
+    metrics.agents_failed = execution_result.agents_failed
+    metrics.retries_used = execution_result.retries_used
 
-        agent_outputs = []
+    # Record per-agent metrics
+    for stage_results in execution_result.stage_results:
+        for r in stage_results:
+            agent_metric = AgentMetric(
+                agent_name=r.agent_name,
+                model_used=r.model_used,
+                provider_used=r.provider_used,
+                latency_ms=r.duration_ms,
+                tokens_used=r.tokens,
+                cost=r.cost,
+                success=r.success,
+            )
+            metrics.add_agent_metric(0, agent_metric)
+            metrics.update_provider_stats(r.provider_used, r.duration_ms, r.success)
+
+    # =========================================================================
+    # 7. COMBINE — Structured agent contract merging
+    # =========================================================================
+    if on_event:
+        await on_event({"type": "phase", "phase": "combining", "message": "Combining agent outputs..."})
+
+    with PhaseTimer() as combine_timer:
+        contracts: list[AgentContract] = []
         for stage_results in execution_result.stage_results:
             for r in stage_results:
                 if r.success and r.output:
-                    agent_outputs.append(r.output)
+                    contract = parse_agent_output(r.agent_name, r.output)
+                    contracts.append(contract)
 
-        verification = verify(
-            execution_result.combined_output,
-            prompt,
-            plan.capabilities,
-            agent_outputs=agent_outputs,
-            complexity=str(plan.complexity),
-        )
+        combined_draft = combine_contracts(contracts, prompt)
+    metrics.combination_latency_ms = combine_timer.elapsed_ms
+
+    # =========================================================================
+    # 7.5 RESPONSE PLANNER (V4.1)
+    # =========================================================================
+    if not is_simple_chat and len(contracts) > 1:
+        if on_event:
+            await on_event({"type": "phase", "phase": "response_planning", "message": "Planning response structure..."})
+        from brain.response_planner import plan_response
+        agent_outputs_dict = {c.agent_name: c.raw_output for c in contracts if c.raw_output}
+        response_outline = await plan_response(prompt, agent_outputs_dict)
+        if on_event and response_outline.raw_outline:
+            await on_event({"type": "response_plan", "outline": response_outline.raw_outline})
+
+    # =========================================================================
+    # 8. VERIFY
+    # =========================================================================
+    if not is_simple_chat and requirements.requires_verification:
+        if on_event:
+            await on_event({"type": "phase", "phase": "verifying", "message": "Verifying output..."})
+
+        with PhaseTimer() as verify_timer:
+            agent_outputs = [c.raw_output for c in contracts if c.raw_output]
+            verification = verify(
+                combined_draft.content,
+                prompt,
+                plan.capabilities,
+                agent_outputs=agent_outputs,
+                complexity=str(plan.complexity),
+            )
+        metrics.verification_latency_ms = verify_timer.elapsed_ms
     else:
         verification = VerificationResult(
             passed=True, score=1.0, signals=[], reasons=["Skipped"], layer=0,
         )
 
-    # 6. HUMANIZE (conditional)
+    # =========================================================================
+    # 9. HUMANIZE & STREAM (V4.1)
+    # =========================================================================
     if on_event:
         await on_event({"type": "phase", "phase": "humanizing", "message": "Preparing response..."})
 
-    if is_simple_chat:
-        # Strip context formatting for chat
-        final_response = execution_result.combined_output
-        if "output ---" in final_response:
-            final_response = final_response.split("output ---\n")[-1].strip()
-    else:
-        humanized = await humanize(
-            execution_result.combined_output,
-            prompt,
-            agent_count=execution_result.agents_executed,
-        )
-        final_response = humanized.content
+    from brain.humanizer import humanize_stream, humanize
 
-    # 7. CONFIDENCE
-    confidence = compute_confidence(
+    with PhaseTimer() as human_timer:
+        if is_simple_chat:
+            final_response = execution_result.combined_output
+            if "output ---" in final_response:
+                final_response = final_response.split("output ---\n")[-1].strip()
+            if on_event:
+                await on_event({"type": "chunk", "text": final_response})
+        else:
+            # V4.1: If on_event is provided, stream tokens in real-time
+            if on_event:
+                chunks = []
+                async for chunk in humanize_stream(combined_draft.content, prompt, agent_count=len(contracts)):
+                    chunks.append(chunk)
+                    await on_event({"type": "chunk", "text": chunk})
+                final_response = "".join(chunks)
+            else:
+                humanized = await humanize(
+                    combined_draft.content,
+                    prompt,
+                    agent_count=len(contracts),
+                )
+                final_response = humanized.content
+
+    metrics.humanization_latency_ms = human_timer.elapsed_ms
+
+    # =========================================================================
+    # 10. TRUST ASSESSMENT
+    # =========================================================================
+    memory_stats = exec_context.execution_memory.summary_stats()
+
+    trust = compute_trust(
         verification_passed=verification.passed,
         verification_score=verification.score,
         agents_executed=execution_result.agents_executed,
         agents_failed=execution_result.agents_failed,
-        retries_used=execution_result.retries_used if hasattr(execution_result, "retries_used") else 0,
+        agent_contributions=combined_draft.agent_contributions,
+        retries_used=execution_result.retries_used,
         max_retries=2,
-        has_research="researcher" in plan.agents,
+        fallbacks_triggered=metrics.fallbacks_triggered,
+        planning_path=plan.planning_path,
+        has_research=has_research,
         research_sources_count=len(research_data["results"]) if research_data else 0,
         low_confidence_no_retrieval=research_data.get("low_confidence_no_retrieval", False) if research_data else False,
+        execution_memory_decisions=memory_stats["decisions"],
+        execution_memory_facts=memory_stats["facts"],
+        cross_agent_agreement=combined_draft.cross_agent_agreement,
+        conflicts_detected=len(combined_draft.conflicts_detected),
+        conflicts_resolved=combined_draft.conflicts_resolved,
         is_simple_chat=is_simple_chat,
-        planning_path_used=plan.planning_path,
+        complexity=plan.complexity,
     )
 
+    # =========================================================================
+    # FINALIZE
+    # =========================================================================
     total_duration = int((time.monotonic() - total_start) * 1000)
+    metrics.total_latency_ms = total_duration
+    metrics.finalize()
+
+    # Record conversation turn
+    session.add_turn("user", prompt, capabilities=plan.capabilities)
+    session.add_turn("assistant", final_response[:500],
+                     capabilities=plan.capabilities,
+                     agents=requirements.agent_types)
 
     # Build agent details
     agents_used = []
@@ -232,7 +419,7 @@ async def _run_orchestration(prompt: str, on_event=None) -> dict:
                 "error": r.error,
             })
 
-    # Build execution footer payload
+    # Execution footer
     execution = []
     for r in agents_used:
         execution.append({
@@ -244,8 +431,19 @@ async def _run_orchestration(prompt: str, on_event=None) -> dict:
 
     verification_footer = {
         "layer1": "passed" if verification.passed else "failed",
-        "layer2": "skipped", # Not fully implemented yet
+        "layer2": "skipped",
     }
+
+    # Trust factors for frontend
+    trust_factors_payload = [
+        {
+            "name": f.name,
+            "score": round(f.score, 2),
+            "explanation": f.explanation,
+            "severity": f.severity,
+        }
+        for f in trust.trust_factors
+    ]
 
     if on_event:
         await on_event({"type": "phase", "phase": "complete", "message": "Done"})
@@ -253,21 +451,26 @@ async def _run_orchestration(prompt: str, on_event=None) -> dict:
     return {
         "success": verification.passed,
         "answer": final_response,
-        "response": final_response,  # Compat
+        "response": final_response,
         "execution": execution,
         "verification_footer": verification_footer,
-        "confidence_score": confidence.confidence,
+        "confidence_score": trust.overall_confidence,
         "planning_path": plan.planning_path,
-        
-        # Detailed internal payloads (for expert mode)
+        "trust_factors": trust_factors_payload,
+        "trust_summary": trust.summary,
+        "trust_recommendation": trust.recommendation,
+        "memory_stats": memory_stats,
+        "metrics": metrics.to_telemetry(),
+
+        # Detailed payloads
         "plan": {
             "intent": plan.intent,
             "complexity": plan.complexity,
             "confidence": plan.confidence,
             "reasoning": plan.reasoning,
             "capabilities": plan.capabilities,
-            "agents": plan.agents,
-            "models": plan.models,
+            "constraints": plan.constraints,
+            "required_outputs": plan.required_outputs,
             "planner_latency_ms": plan.planner_latency_ms,
         },
         "verification": {
@@ -281,9 +484,10 @@ async def _run_orchestration(prompt: str, on_event=None) -> dict:
             ],
         },
         "confidence": {
-            "score": confidence.confidence,
-            "summary": confidence.summary,
-            "factors": confidence.factors,
+            "score": trust.overall_confidence,
+            "summary": trust.summary,
+            "recommendation": trust.recommendation,
+            "agent_contributions": trust.agent_contributions,
         },
         "research": {
             "sources": research_data["results"] if research_data else [],
@@ -292,6 +496,52 @@ async def _run_orchestration(prompt: str, on_event=None) -> dict:
         "agents_used": agents_used,
         "duration_ms": total_duration,
     }
+
+
+def _build_dag_from_context(ctx: ExecutionContext) -> ExecutionDAG:
+    """Build a DAG from the V3 ExecutionContext (bridging to existing dag_builder)."""
+    from brain.dag_builder import DAGStage, ExecutionDAG
+
+    stages: list[DAGStage] = []
+    # Group assignments by stage_order
+    groups: dict[int, list] = {}
+    for assignment in ctx.assignments:
+        order = assignment.stage_order
+        if order not in groups:
+            groups[order] = []
+        groups[order].append(assignment)
+
+    for i, order in enumerate(sorted(groups.keys())):
+        group = groups[order]
+        agent_names = [a.agent_name for a in group]
+        models = {a.agent_name: a.model_spec.id for a in group}
+
+        if len(group) == 1:
+            name = group[0].agent_spec.display_name
+        else:
+            name = f"Stage {i}"
+
+        stages.append(DAGStage(
+            stage_id=i,
+            name=name,
+            agents=agent_names,
+            models=models,
+            parallel=len(group) > 1,
+            depends_on=[i - 1] if i > 0 else [],
+        ))
+
+    total_agents = sum(len(s.agents) for s in stages)
+    sequential_count = sum(1 for s in stages if not s.parallel)
+    parallel_count = sum(1 for s in stages if s.parallel)
+    estimated_duration = (sequential_count * 30) + (parallel_count * 30)
+
+    return ExecutionDAG(
+        stages=stages,
+        total_stages=len(stages),
+        total_agents=total_agents,
+        has_parallel_stages=any(s.parallel for s in stages),
+        estimated_duration_seconds=estimated_duration,
+    )
 
 
 # =============================================================================
@@ -303,7 +553,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "vexora-orchestrator",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "agents_registered": len(AGENTS),
         "models_registered": len(MODELS),
         "providers": list(set(m.provider for m in MODELS.values())),
@@ -312,22 +562,8 @@ async def health_check():
 
 @app.post("/api/orchestrate")
 async def orchestrate(request: PromptRequest):
-    """Full orchestration: plan → execute → verify → humanize → confidence."""
-    result = await _run_orchestration(request.prompt)
-
-    if not request.expert_mode:
-        # Strip internal details for non-expert mode
-        return OrchestrateResponse(
-            success=result["success"],
-            answer=result["answer"],
-            response=result["response"],
-            execution=result["execution"],
-            verification=result["verification_footer"],
-            confidence=result["confidence_score"],
-            planning_path=result["planning_path"],
-            agents_used=result["agents_used"],
-            duration_ms=result["duration_ms"],
-        )
+    """Full orchestration: plan → resolve → execute → combine → verify → humanize → trust."""
+    result = await _run_orchestration(request.prompt, session_id=request.session_id)
 
     return OrchestrateResponse(
         success=result["success"],
@@ -337,7 +573,10 @@ async def orchestrate(request: PromptRequest):
         verification=result["verification_footer"],
         confidence=result["confidence_score"],
         planning_path=result["planning_path"],
-        plan=result["plan"],
+        trust_factors=result.get("trust_factors", []),
+        memory_stats=result.get("memory_stats"),
+        metrics=result.get("metrics") if request.expert_mode else None,
+        plan=result.get("plan") if request.expert_mode else None,
         agents_used=result["agents_used"],
         duration_ms=result["duration_ms"],
     )
@@ -345,26 +584,30 @@ async def orchestrate(request: PromptRequest):
 
 @app.post("/api/orchestrate/stream")
 async def orchestrate_stream(request: PromptRequest):
-    """SSE streaming orchestration — events emitted line by line as agents execute."""
+    """V4.1 Real-time SSE streaming orchestration."""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def collect_event(event: dict):
+        await queue.put(event)
+
+    async def run_pipeline():
+        try:
+            result = await _run_orchestration(
+                request.prompt, on_event=collect_event, session_id=request.session_id
+            )
+            await queue.put({"type": "result", **result})
+        except Exception as exc:
+            await queue.put({"type": "error", "message": str(exc)})
+        finally:
+            await queue.put(None)  # Sentinel to signal completion
 
     async def event_generator():
-        async def on_event(event: dict):
-            yield f"data: {json.dumps(event)}\n\n"
-
-        # We need to collect events since on_event is a callback
-        events: list[dict] = []
-
-        async def collect_event(event: dict):
-            events.append(event)
-
-        result = await _run_orchestration(request.prompt, on_event=collect_event)
-
-        # Emit collected events first
-        for event in events:
-            yield f"data: {json.dumps(event)}\n\n"
-
-        # Then emit the final result
-        yield f"data: {json.dumps({'type': 'result', **result})}\n\n"
+        asyncio.create_task(run_pipeline())
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -380,8 +623,9 @@ async def orchestrate_stream(request: PromptRequest):
 
 @app.post("/api/plan")
 async def create_plan(request: PromptRequest):
-    """Dry-run: returns only the execution plan without executing."""
+    """Dry-run: returns the plan + resolved requirements without executing."""
     plan = await generate_plan(request.prompt)
+    requirements = resolve_capabilities(plan.capabilities, plan.complexity)
 
     return {
         "success": True,
@@ -390,15 +634,17 @@ async def create_plan(request: PromptRequest):
         "confidence": plan.confidence,
         "reasoning": plan.reasoning,
         "capabilities": plan.capabilities,
-        "agents": plan.agents,
-        "models": plan.models,
-        "tools": plan.tools,
-        "parallel_groups": plan.parallel_groups,
-        "verification": plan.verification,
-        "humanizer": plan.humanizer,
-        "estimated_latency_ms": plan.estimated_latency_ms,
-        "estimated_cost": plan.estimated_cost,
+        "constraints": plan.constraints,
+        "required_outputs": plan.required_outputs,
+        "missing_information": plan.missing_information,
+        "needs_clarification": plan.needs_clarification,
+        "clarification_questions": plan.clarification_questions,
+        "resolved_agents": requirements.agent_types,
+        "resolved_tools": requirements.tool_types,
+        "model_capabilities": requirements.model_capabilities,
+        "parallel_groups": requirements.parallel_groups,
         "planner_latency_ms": plan.planner_latency_ms,
+        "planning_path": plan.planning_path,
     }
 
 

@@ -188,28 +188,70 @@ function Workspace() {
                 
                 if (data.type === "phase") {
                   currentMsg.phase = data.message;
-                  currentMsg.content = `[${data.message}]`;
+                  // If content is still empty, set a subtle status indicator
+                  if (!currentMsg.content || currentMsg.content.startsWith("[")) {
+                    currentMsg.content = `[${data.message}]`;
+                  }
+                } else if (data.type === "chunk") {
+                  // Real-time token streaming
+                  if (currentMsg.content.startsWith("[")) {
+                    currentMsg.content = "";
+                  }
+                  currentMsg.content += data.text;
+                } else if (data.type === "response_plan") {
+                  currentMsg.response_plan = data.outline;
+                } else if (data.type === "agent_start") {
+                  const existing = currentMsg.agents_used || [];
+                  if (!existing.some((a: any) => a.name === data.agent)) {
+                    currentMsg.agents_used = [...existing, {
+                      name: data.agent,
+                      display_name: data.agent,
+                      model: data.model,
+                      status: "running",
+                    }];
+                  }
+                } else if (data.type === "agent_complete") {
+                  const existing = currentMsg.agents_used || [];
+                  const updated = existing.map((a: any) => {
+                    if (a.name === data.agent) {
+                      return {
+                        ...a,
+                        model: data.model || a.model,
+                        provider: data.provider,
+                        duration_ms: data.duration_ms,
+                        tokens: data.tokens,
+                        status: data.success ? "completed" : "failed",
+                        success: data.success,
+                      };
+                    }
+                    return a;
+                  });
+                  if (!updated.some((a: any) => a.name === data.agent)) {
+                    updated.push({
+                      name: data.agent,
+                      display_name: data.agent,
+                      model: data.model,
+                      provider: data.provider,
+                      duration_ms: data.duration_ms,
+                      tokens: data.tokens,
+                      status: data.success ? "completed" : "failed",
+                      success: data.success,
+                    });
+                  }
+                  currentMsg.agents_used = updated;
                 } else if (data.type === "plan_ready") {
                   currentMsg.plan = data;
-                } else if (data.type === "agent_complete") {
-                  currentMsg.agents_used = [...(currentMsg.agents_used || []), {
-                    name: data.agent,
-                    display_name: data.agent,
-                    model: data.model,
-                    duration_ms: data.duration_ms,
-                    success: data.success,
-                  }];
                 } else if (data.type === "result") {
-                  currentMsg.content = data.answer ?? data.response;
+                  if (!currentMsg.content || currentMsg.content.startsWith("[")) {
+                    currentMsg.content = data.answer ?? data.response;
+                  }
                   currentMsg.execution = data.execution ?? [];
                   currentMsg.planning_path = data.planning_path ?? "primary";
                   currentMsg.confidence = data.confidence;
                   currentMsg.verification = data.verification;
                   currentMsg.duration_ms = data.duration_ms;
-                  if (expert) {
-                    currentMsg.plan = data.plan;
-                    currentMsg.agents_used = data.agents_used;
-                  }
+                  currentMsg.plan = data.plan;
+                  currentMsg.agents_used = data.agents_used || currentMsg.agents_used;
                   currentMsg.phase = "Done";
                 }
                 
@@ -701,7 +743,7 @@ function Conversation({
             m.role === "user" ? (
               <UserMessage key={i}>{m.content}</UserMessage>
             ) : (
-              <AssistantMessage key={i} expert={expert} language={language} content={m.content} />
+              <AssistantMessage key={i} expert={expert} language={language} content={m.content} execution={m.execution} />
             )
           )}
           
@@ -736,7 +778,7 @@ function UserMessage({ children }: { children: React.ReactNode }) {
   );
 }
 
-function AssistantMessage({ expert, language, content }: { expert: boolean; language: LanguageCode; content: string }) {
+function AssistantMessage({ expert, language, content, execution }: { expert: boolean; language: LanguageCode; content: string; execution?: any[] }) {
   const t = convo(language);
   return (
     <article className="vx-stream flex flex-col gap-5">
@@ -758,6 +800,25 @@ function AssistantMessage({ expert, language, content }: { expert: boolean; lang
       <div className="text-[15px] leading-[1.75] text-ink-soft whitespace-pre-wrap">
         {content}
       </div>
+
+      {execution && execution.length > 0 && (
+        <div className="mt-2 pt-4 border-t border-hairline">
+          <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-2.5">
+            Intelligence Stack
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {execution.map((agent: any, idx: number) => (
+              <div key={idx} className="flex flex-col gap-0.5 rounded-lg border border-hairline bg-surface-elevated px-2.5 py-1.5 text-[11px]">
+                <div className="flex items-center gap-1.5">
+                  <span className={`h-1.5 w-1.5 rounded-full ${agent.status === 'completed' ? 'bg-green-500' : 'bg-red-500'}`} />
+                  <span className="font-medium text-ink">{agent.agent}</span>
+                </div>
+                <span className="text-ink-muted pl-3">{agent.model} · {agent.provider}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <MessageActions language={language} />
     </article>
@@ -1016,9 +1077,13 @@ function RightPanel({
   const plan = lastAssistantMsg?.plan;
   const verification = lastAssistantMsg?.verification;
   const duration = lastAssistantMsg?.duration_ms;
-  const confidence = lastAssistantMsg?.confidence; // Now an integer (0-100)
-  const execution = lastAssistantMsg?.execution;
+  const confidence = lastAssistantMsg?.confidence;
+  const execution = lastAssistantMsg?.execution && lastAssistantMsg.execution.length > 0
+    ? lastAssistantMsg.execution
+    : (lastAssistantMsg?.agents_used || []);
   const planning_path = lastAssistantMsg?.planning_path;
+  const responsePlanOutline = lastAssistantMsg?.response_plan;
+  const phase = lastAssistantMsg?.phase;
 
   return (
     <aside
@@ -1033,7 +1098,7 @@ function RightPanel({
           ) : (
             <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
           )}
-          {isLoading ? "Running..." : "Idle"}
+          {isLoading ? (phase || "Running...") : "Idle"}
         </div>
         <button
           onClick={onClose}
@@ -1046,6 +1111,14 @@ function RightPanel({
 
       <div className="vx-scrollbar flex-1 overflow-y-auto px-4 py-4">
         
+        {responsePlanOutline && (
+          <PanelSection icon={Brain} title="Response Outline" meta="V4.1">
+            <div className="rounded-xl border border-hairline bg-surface-elevated px-3 py-2 text-[11px] font-mono text-ink-soft whitespace-pre-wrap">
+              {responsePlanOutline}
+            </div>
+          </PanelSection>
+        )}
+
         {confidence !== undefined && (
           <PanelSection icon={Activity} title="Confidence" meta={`${confidence}/100`}>
             <div className="flex flex-col gap-2">
@@ -1081,24 +1154,31 @@ function RightPanel({
           <PanelSection icon={Layers} title="Agents Executed" meta={`${execution.length} total`}>
             <div className="flex flex-col gap-2">
               {execution.map((agent: any, idx: number) => (
-                <div key={`${agent.agent}-${idx}`} className="flex flex-col gap-1 rounded-xl border border-hairline bg-surface-elevated px-3 py-2 text-[12px]">
+                <div key={`${agent.agent || agent.name}-${idx}`} className="flex flex-col gap-1 rounded-xl border border-hairline bg-surface-elevated px-3 py-2 text-[12px]">
                   <div className="flex items-center justify-between">
-                    <span className="text-ink-soft">{agent.agent}</span>
-                    {agent.status === "completed" ? (
+                    <span className="text-ink-soft">{agent.agent || agent.name || agent.display_name}</span>
+                    {agent.status === "completed" || agent.success ? (
                       <span className="text-green-600 font-medium">Completed</span>
+                    ) : agent.status === "running" ? (
+                      <span className="text-amber-500 font-medium animate-pulse">Running...</span>
                     ) : (
                       <span className="text-red-600 font-medium">Failed</span>
                     )}
                   </div>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between text-[11px]">
                     <span className="text-ink-muted font-mono">{agent.model}</span>
-                    <span className="text-ink-muted">{agent.provider}</span>
+                    {agent.duration_ms ? (
+                      <span className="text-ink-muted">{agent.duration_ms}ms</span>
+                    ) : (
+                      <span className="text-ink-muted">{agent.provider || ""}</span>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
           </PanelSection>
         )}
+
 
         {duration && (
           <PanelSection icon={Activity} title="Performance" meta={`${duration}ms`}>

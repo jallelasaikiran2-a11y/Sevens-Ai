@@ -13,8 +13,10 @@ Supports:
 
 from __future__ import annotations
 import asyncio
+import json as json_mod
 import os
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol, Optional
 
@@ -64,6 +66,29 @@ VEXORA_IDENTITY_PREFIX = (
     "If asked who you are, say 'I am VEXORA, an adaptive intelligence engine.'\n\n"
 )
 
+# V4.1 — Structured Agent Contract: Appended to every specialist agent prompt.
+# This forces agents to produce parseable output for the Combiner.
+AGENT_CONTRACT_SUFFIX = (
+    "\n\n--- OUTPUT FORMAT ---\n"
+    "Structure your response with these Markdown sections. Include ALL sections even if empty.\n\n"
+    "## Summary\nBrief description of what you did.\n\n"
+    "## Deliverables\nBullet list of what you produced.\n\n"
+    "## Decisions\nFor EACH decision you made, state:\n"
+    "- **Decision:** what you decided\n"
+    "- **Reasoning:** why\n"
+    "- **Alternatives considered:** what else you evaluated\n"
+    "- **Rejected because:** why the alternatives were worse\n"
+    "- **Confidence:** High / Medium / Low\n\n"
+    "## Facts\nBullet list of facts or constraints you discovered.\n\n"
+    "## Assumptions\nBullet list of assumptions you made.\n\n"
+    "## Constraints\nBullet list of constraints you are working within.\n\n"
+    "## Handoff Notes\nAnything the next agent downstream needs to know.\n\n"
+    "Then include your full technical output (code, architecture, analysis, etc.) AFTER these sections."
+)
+
+# Agents that should NOT get the contract suffix (they output free-form text).
+_NO_CONTRACT_AGENTS = {"conversation", "humanizer", "verifier"}
+
 AGENT_SYSTEM_PROMPTS = {
     "architect": "You are the Architect. Your SOLE responsibility is system architecture: high-level design, schemas, technical decisions, and component layout. Do NOT write implementation code.",
     "core-architect": "You are the Core Architect. Focus ONLY on deep architectural analysis and core system design patterns.",
@@ -90,12 +115,19 @@ AGENT_SYSTEM_PROMPTS = {
 }
 
 def get_system_prompt(agent_name: str) -> str:
-    """Get system prompt for an agent, always prefixed with VEXORA identity."""
+    """Get system prompt for an agent, always prefixed with VEXORA identity.
+    
+    V4.1: Specialist agents also get the structured contract suffix
+    so their output is parseable by the Combiner.
+    """
     role_prompt = AGENT_SYSTEM_PROMPTS.get(
         agent_name,
         f"You are the {agent_name} agent. Complete your designated task."
     )
-    return VEXORA_IDENTITY_PREFIX + role_prompt
+    prompt = VEXORA_IDENTITY_PREFIX + role_prompt
+    if agent_name not in _NO_CONTRACT_AGENTS:
+        prompt += AGENT_CONTRACT_SUFFIX
+    return prompt
 
 
 # =============================================================================
@@ -112,23 +144,45 @@ class GenerationResult:
     cost: float = 0.0
 
 
+# V4.1 — Default timeout slashed from 180s to 30s for fast failover.
+_DEFAULT_TIMEOUT = 30.0
+
+# V4.1 — Provider health tracking for singleton adapters.
+_HEALTH_DEGRADED_SECONDS = 300  # 5 minutes
+
+
 class ProviderAdapter(Protocol):
     async def generate(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> GenerationResult:
+        ...
+    async def generate_stream(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> AsyncIterator[str]:
         ...
 
 
 class OpenRouterAdapter:
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
+        self.health_status = "HEALTHY"      # HEALTHY | DEGRADED | OFFLINE
+        self.degraded_until: float = 0.0
         if not self.api_key:
             print("[WARN] OPENROUTER_API_KEY is not set.")
+            self.health_status = "OFFLINE"
+
+    def is_healthy(self) -> bool:
+        if self.health_status == "DEGRADED" and time.monotonic() > self.degraded_until:
+            self.health_status = "HEALTHY"
+        return self.health_status == "HEALTHY"
+
+    def mark_degraded(self):
+        self.health_status = "DEGRADED"
+        self.degraded_until = time.monotonic() + _HEALTH_DEGRADED_SECONDS
+        print(f"[HEALTH] OpenRouter marked DEGRADED for {_HEALTH_DEGRADED_SECONDS}s")
 
     async def generate(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> GenerationResult:
         if not self.api_key:
             raise ValueError("OPENROUTER_API_KEY not configured.")
 
         start_time = time.monotonic()
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
             response = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
@@ -168,12 +222,63 @@ class OpenRouterAdapter:
                 cost=cost
             )
 
+    async def generate_stream(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> AsyncIterator[str]:
+        """Stream tokens from OpenRouter using SSE (OpenAI-compatible format)."""
+        if not self.api_key:
+            raise ValueError("OPENROUTER_API_KEY not configured.")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=60.0, connect=10.0)) as client:
+            async with client.stream(
+                "POST",
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "HTTP-Referer": "http://localhost:8081",
+                    "X-Title": "VEXORA",
+                },
+                json={
+                    "model": model.id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": temperature,
+                    "stream": True,
+                }
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json_mod.loads(data_str)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            text = delta.get("content", "")
+                            if text:
+                                yield text
+                        except (json_mod.JSONDecodeError, IndexError, KeyError):
+                            continue
+
 
 class GeminiAdapter:
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY")
+        self.health_status = "HEALTHY"
+        self.degraded_until: float = 0.0
         if not self.api_key:
             print("[WARN] GEMINI_API_KEY is not set.")
+            self.health_status = "OFFLINE"
+
+    def is_healthy(self) -> bool:
+        if self.health_status == "DEGRADED" and time.monotonic() > self.degraded_until:
+            self.health_status = "HEALTHY"
+        return self.health_status == "HEALTHY"
+
+    def mark_degraded(self):
+        self.health_status = "DEGRADED"
+        self.degraded_until = time.monotonic() + _HEALTH_DEGRADED_SECONDS
+        print(f"[HEALTH] Gemini marked DEGRADED for {_HEALTH_DEGRADED_SECONDS}s")
 
     async def generate(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> GenerationResult:
         if not self.api_key:
@@ -182,9 +287,10 @@ class GeminiAdapter:
             raise ValueError("GEMINI_API_KEY appears invalid (does not start with AIza or AQ.).")
 
         start_time = time.monotonic()
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
             response = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model.id}:generateContent?key={self.api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model.id}:generateContent",
+                headers={"x-goog-api-key": self.api_key},
                 json={
                     "system_instruction": {
                         "parts": [{"text": system_prompt}]
@@ -199,7 +305,6 @@ class GeminiAdapter:
             )
             response.raise_for_status()
             data = response.json()
-            print("[GEMINI RESPONSE DATA]", data)
 
             content = data["candidates"][0]["content"]["parts"][0]["text"]
             
@@ -222,19 +327,67 @@ class GeminiAdapter:
                 cost=cost
             )
 
+    async def generate_stream(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> AsyncIterator[str]:
+        """Stream tokens from Gemini using streamGenerateContent with SSE."""
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY not configured.")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=60.0, connect=10.0)) as client:
+            async with client.stream(
+                "POST",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model.id}:streamGenerateContent?alt=sse",
+                headers={"x-goog-api-key": self.api_key},
+                json={
+                    "system_instruction": {
+                        "parts": [{"text": system_prompt}]
+                    },
+                    "contents": [
+                        {"role": "user", "parts": [{"text": prompt}]}
+                    ],
+                    "generationConfig": {
+                        "temperature": temperature,
+                    }
+                }
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        try:
+                            chunk = json_mod.loads(data_str)
+                            parts = chunk.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                            for part in parts:
+                                text = part.get("text", "")
+                                if text:
+                                    yield text
+                        except (json_mod.JSONDecodeError, IndexError, KeyError):
+                            continue
+
 
 class GroqAdapter:
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
+        self.health_status = "HEALTHY"
+        self.degraded_until: float = 0.0
         if not self.api_key:
             print("[WARN] GROQ_API_KEY is not set.")
+            self.health_status = "OFFLINE"
+
+    def is_healthy(self) -> bool:
+        if self.health_status == "DEGRADED" and time.monotonic() > self.degraded_until:
+            self.health_status = "HEALTHY"
+        return self.health_status == "HEALTHY"
+
+    def mark_degraded(self):
+        self.health_status = "DEGRADED"
+        self.degraded_until = time.monotonic() + _HEALTH_DEGRADED_SECONDS
+        print(f"[HEALTH] Groq marked DEGRADED for {_HEALTH_DEGRADED_SECONDS}s")
 
     async def generate(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> GenerationResult:
         if not self.api_key:
             raise ValueError("GROQ_API_KEY not configured.")
 
         start_time = time.monotonic()
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
             response = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={
@@ -272,20 +425,68 @@ class GroqAdapter:
                 cost=cost
             )
 
+    async def generate_stream(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> AsyncIterator[str]:
+        """Stream tokens from Groq using SSE (OpenAI-compatible format)."""
+        if not self.api_key:
+            raise ValueError("GROQ_API_KEY not configured.")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=60.0, connect=10.0)) as client:
+            async with client.stream(
+                "POST",
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                json={
+                    "model": model.id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": temperature,
+                    "stream": True,
+                }
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json_mod.loads(data_str)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            text = delta.get("content", "")
+                            if text:
+                                yield text
+                        except (json_mod.JSONDecodeError, IndexError, KeyError):
+                            continue
+
+
+# V4.1 — Singleton adapter pool with shared health state.
+_adapter_pool: dict[str, ProviderAdapter] = {}
 
 def get_adapter(provider_name: str) -> ProviderAdapter:
+    """Return a singleton adapter for the given provider.
+    
+    V4.1: Adapters are reused across calls so health state (HEALTHY/DEGRADED)
+    persists. A provider marked DEGRADED after a timeout will be instantly
+    skipped by _execute_agent without waiting 30s to rediscover the failure.
+    """
+    if provider_name in _adapter_pool:
+        return _adapter_pool[provider_name]
     if provider_name == "openrouter":
-        return OpenRouterAdapter()
+        _adapter_pool[provider_name] = OpenRouterAdapter()
     elif provider_name == "gemini":
-        return GeminiAdapter()
+        _adapter_pool[provider_name] = GeminiAdapter()
     elif provider_name == "groq":
-        return GroqAdapter()
+        _adapter_pool[provider_name] = GroqAdapter()
     else:
         raise ValueError(f"Unknown provider: {provider_name}")
+    return _adapter_pool[provider_name]
 
 
 # =============================================================================
-# Execution (TASK 2: Global Retry Cap + Streaming)
+# Execution — V4.1: Health-aware fast failover + Dependency-driven scheduling
 # =============================================================================
 
 async def _execute_agent(
@@ -296,7 +497,12 @@ async def _execute_agent(
     context: str = "",
     on_event: object = None,
 ) -> AgentResult:
-    """Execute a single agent using the appropriate provider adapter."""
+    """Execute a single agent using the appropriate provider adapter.
+    
+    V4.1: Checks provider health BEFORE attempting. If DEGRADED, skips
+    directly to fallback — zero timeout wasted. On failure, marks the
+    provider DEGRADED so all subsequent agents failover instantly.
+    """
     
     primary_model_spec = get_model(model_id)
     if not primary_model_spec:
@@ -311,18 +517,29 @@ async def _execute_agent(
     if context:
         full_task = f"Previous context and work done by other agents:\n{context}\n\nYour task:\n{task}"
 
-    # Try primary model
-    try:
-        adapter = get_adapter(primary_model_spec.provider)
-        res = await adapter.generate(full_task, primary_model_spec, system_prompt)
-        return AgentResult(
-            agent_name=agent_name, stage_id=stage_id, success=True,
-            output=res.content, duration_ms=res.latency,
-            model_used=res.model, provider_used=res.provider,
-            tokens=res.tokens, cost=res.cost
-        )
-    except Exception as e:
-        error_msg = f"Primary ({primary_model_spec.provider}/{model_id}) failed: {str(e)}. "
+    # V4.1: Check provider health BEFORE attempting
+    primary_adapter = get_adapter(primary_model_spec.provider)
+    primary_healthy = hasattr(primary_adapter, 'is_healthy') and primary_adapter.is_healthy()
+    # If adapter doesn't have is_healthy (Protocol), assume healthy
+    if not hasattr(primary_adapter, 'is_healthy'):
+        primary_healthy = True
+
+    if primary_healthy:
+        try:
+            res = await primary_adapter.generate(full_task, primary_model_spec, system_prompt)
+            return AgentResult(
+                agent_name=agent_name, stage_id=stage_id, success=True,
+                output=res.content, duration_ms=res.latency,
+                model_used=res.model, provider_used=res.provider,
+                tokens=res.tokens, cost=res.cost
+            )
+        except Exception as e:
+            # V4.1: Mark provider as DEGRADED so subsequent agents skip it
+            if hasattr(primary_adapter, 'mark_degraded'):
+                primary_adapter.mark_degraded()
+            error_msg = f"Primary ({primary_model_spec.provider}/{model_id}) failed: {str(e)[:200]}. "
+    else:
+        error_msg = f"Primary ({primary_model_spec.provider}) is DEGRADED — skipped. "
 
     # Failover to a DIFFERENT provider
     from .model_registry import best_models
@@ -338,8 +555,14 @@ async def _execute_agent(
     fallback_model_spec = None
     for cand in candidates:
         if cand.provider != primary_model_spec.provider and cand.is_available:
-            fallback_model_spec = cand
-            break
+            # V4.1: Also check fallback provider health
+            fb_adapter = get_adapter(cand.provider)
+            fb_healthy = hasattr(fb_adapter, 'is_healthy') and fb_adapter.is_healthy()
+            if not hasattr(fb_adapter, 'is_healthy'):
+                fb_healthy = True
+            if fb_healthy:
+                fallback_model_spec = cand
+                break
             
     if not fallback_model_spec:
         # absolute fallback just in case
@@ -357,7 +580,9 @@ async def _execute_agent(
                 tokens=res.tokens, cost=res.cost
             )
         except Exception as e2:
-            error_msg += f"Fallback ({fallback_model_spec.provider}/{fallback_model_spec.id}) failed: {str(e2)}."
+            if hasattr(adapter, 'mark_degraded'):
+                adapter.mark_degraded()
+            error_msg += f"Fallback ({fallback_model_spec.provider}/{fallback_model_spec.id}) failed: {str(e2)[:200]}."
     else:
         error_msg += "No fallback provider available."
 
@@ -372,111 +597,153 @@ async def execute_dag(
     dag: ExecutionDAG,
     task: str,
     on_event=None,
-    retry_budget: dict[str, int] = {"planning": 2, "execution": 2},
+    retry_budget: dict[str, int] | None = None,
 ) -> ExecutionResult:
-    """
-    Execute the entire DAG, stage by stage.
+    """Execute the DAG using V4.1 dependency-driven scheduling.
 
-    - Sequential stages run one after another
-    - Parallel agents within a stage run concurrently
-    - Context from previous stages is passed forward
-    - TASK 2: Global retry_budget (max 2 retries total per request)
-    - Streaming: If on_event callback is provided, emit events per agent
+    Instead of waiting for entire stages to complete, each agent launches
+    the millisecond ALL of its declared dependencies have finished.
+    Independent branches execute concurrently. Dependent branches start
+    immediately after their parents — no artificial barriers.
+
+    The algorithm:
+    1. Build a {agent_name: asyncio.Future} map.
+    2. For each agent, create a coroutine that:
+       a. Awaits all its dependency futures.
+       b. Builds its context from completed dependency outputs.
+       c. Calls _execute_agent.
+       d. Resolves its own future.
+    3. asyncio.gather all agent coroutines — maximum safe parallelism.
     """
+    if retry_budget is None:
+        retry_budget = {"planning": 2, "execution": 2}
+
     start = time.monotonic()
-
-    all_stage_results: list[list[AgentResult]] = []
-    accumulated_context = ""
-    agents_executed = 0
-    agents_failed = 0
-    retries_used = 0
     execution_budget = retry_budget.get("execution", 2)
+    retries_used = 0
 
+    # Build agent metadata lookup from the DAG
+    agent_models: dict[str, str] = {}      # agent_name -> model_id
+    agent_deps: dict[str, list[str]] = {}  # agent_name -> [dependency agent names]
+    agent_stage: dict[str, int] = {}       # agent_name -> stage_id
+
+    all_agent_names: list[str] = []
     for stage in dag.stages:
-        # Emit stage-start event
+        for agent_name in stage.agents:
+            agent_models[agent_name] = stage.models.get(agent_name, "unknown")
+            agent_stage[agent_name] = stage.stage_id
+            all_agent_names.append(agent_name)
+            # Use stage.depends_on to derive agent-level deps:
+            # An agent depends on ALL agents from the stages it depends_on.
+            deps = []
+            for dep_stage_id in stage.depends_on:
+                for s in dag.stages:
+                    if s.stage_id == dep_stage_id:
+                        deps.extend(s.agents)
+            agent_deps[agent_name] = deps
+
+    # Create a future for each agent
+    agent_futures: dict[str, asyncio.Future] = {}
+    loop = asyncio.get_event_loop()
+    for name in all_agent_names:
+        agent_futures[name] = loop.create_future()
+
+    # Results collector
+    all_results: dict[str, AgentResult] = {}
+
+    async def _run_agent(agent_name: str):
+        nonlocal retries_used
+
+        # 1. Wait for all dependencies to complete
+        deps = agent_deps.get(agent_name, [])
+        if deps:
+            dep_futures = [agent_futures[d] for d in deps if d in agent_futures]
+            if dep_futures:
+                await asyncio.gather(*dep_futures)
+
+        # 2. Build context from completed dependency outputs (targeted, not global)
+        context_parts = []
+        for dep_name in deps:
+            dep_result = all_results.get(dep_name)
+            if dep_result and dep_result.success:
+                context_parts.append(f"--- {dep_name} output ---\n{dep_result.output}")
+        context = "\n\n".join(context_parts)
+
+        # 3. Emit agent-start event
         if on_event:
             await on_event({
-                "type": "stage_start",
-                "stage_id": stage.stage_id,
-                "stage_name": stage.name,
-                "agents": stage.agents,
+                "type": "agent_start",
+                "agent": agent_name,
+                "stage_id": agent_stage.get(agent_name, 0),
+                "model": agent_models.get(agent_name, "unknown"),
             })
 
-        if stage.parallel and len(stage.agents) > 1:
-            tasks = []
-            for agent_name in stage.agents:
-                model_id = stage.models.get(agent_name, "unknown")
-                tasks.append(
-                    _execute_agent(agent_name, task, model_id, stage.stage_id, accumulated_context, on_event)
-                )
-            stage_results = list(await asyncio.gather(*tasks))
-        else:
-            stage_results = []
-            for agent_name in stage.agents:
-                model_id = stage.models.get(agent_name, "unknown")
-                result = await _execute_agent(
-                    agent_name, task, model_id, stage.stage_id, accumulated_context, on_event
-                )
-                stage_results.append(result)
+        # 4. Execute the agent
+        model_id = agent_models.get(agent_name, "unknown")
+        sid = agent_stage.get(agent_name, 0)
+        result = await _execute_agent(agent_name, task, model_id, sid, context, on_event)
 
-        # Process results + retry logic
-        final_stage_results = []
-        for result in stage_results:
-            if not result.success and retries_used < execution_budget:
-                # Exponential backoff for 429s
-                if "429" in (result.error or ""):
-                    backoff = 1.5 ** retries_used
-                    print(f"[RETRY] 429 Rate Limit hit. Backing off for {backoff:.2f}s...")
-                    await asyncio.sleep(backoff)
-
-                # TASK 2: Retry with execution budget
-                retries_used += 1
-                print(f"[RETRY {retries_used}/{execution_budget}] Retrying {result.agent_name}")
-                if on_event:
-                    await on_event({
-                        "type": "agent_retry",
-                        "agent": result.agent_name,
-                        "retry_number": retries_used,
-                    })
-                model_id = stage.models.get(result.agent_name, "unknown")
-                retry_result = await _execute_agent(
-                    result.agent_name, task, model_id, stage.stage_id, accumulated_context, on_event
-                )
-                final_stage_results.append(retry_result)
-            else:
-                final_stage_results.append(result)
-
-        all_stage_results.append(final_stage_results)
-
-        for result in final_stage_results:
-            agents_executed += 1
-
-            # Emit per-agent event
+        # 5. Retry if failed and budget allows
+        if not result.success and retries_used < execution_budget:
+            if "429" in (result.error or ""):
+                backoff = 1.5 ** retries_used
+                await asyncio.sleep(backoff)
+            retries_used += 1
+            print(f"[RETRY {retries_used}/{execution_budget}] Retrying {agent_name}")
             if on_event:
                 await on_event({
-                    "type": "agent_complete",
-                    "agent": result.agent_name,
-                    "success": result.success,
-                    "model": result.model_used,
-                    "provider": result.provider_used,
-                    "duration_ms": result.duration_ms,
-                    "tokens": result.tokens,
+                    "type": "agent_retry",
+                    "agent": agent_name,
+                    "retry_number": retries_used,
                 })
+            result = await _execute_agent(agent_name, task, model_id, sid, context, on_event)
 
-            if result.success:
-                accumulated_context += f"\n\n--- {result.agent_name} output ---\n{result.output}"
-            else:
-                agents_failed += 1
+        # 6. Store result and resolve future
+        all_results[agent_name] = result
+        if not agent_futures[agent_name].done():
+            agent_futures[agent_name].set_result(result)
 
-        # Emit stage-complete event
+        # 7. Emit agent-complete event
         if on_event:
             await on_event({
-                "type": "stage_complete",
-                "stage_id": stage.stage_id,
+                "type": "agent_complete",
+                "agent": result.agent_name,
+                "success": result.success,
+                "model": result.model_used,
+                "provider": result.provider_used,
+                "duration_ms": result.duration_ms,
+                "tokens": result.tokens,
             })
 
+    # Launch all agents concurrently — dependencies are handled internally
+    await asyncio.gather(*[_run_agent(name) for name in all_agent_names])
+
+    # Build stage_results in the original format for backward compatibility
+    stage_results_map: dict[int, list[AgentResult]] = {}
+    agents_executed = 0
+    agents_failed = 0
+
+    for name in all_agent_names:
+        result = all_results[name]
+        sid = agent_stage.get(name, 0)
+        if sid not in stage_results_map:
+            stage_results_map[sid] = []
+        stage_results_map[sid].append(result)
+        agents_executed += 1
+        if not result.success:
+            agents_failed += 1
+
+    all_stage_results = [stage_results_map[k] for k in sorted(stage_results_map.keys())]
+
+    # Build combined output (still needed for Combiner compatibility)
+    combined_parts = []
+    for name in all_agent_names:
+        r = all_results.get(name)
+        if r and r.success:
+            combined_parts.append(f"--- {name} output ---\n{r.output}")
+    combined = "\n\n".join(combined_parts)
+
     total_duration = int((time.monotonic() - start) * 1000)
-    combined = accumulated_context.strip()
 
     return ExecutionResult(
         success=agents_failed == 0,

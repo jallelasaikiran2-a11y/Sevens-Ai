@@ -1,15 +1,21 @@
 """
-VEXORA Adaptive Planner — V2
+VEXORA Adaptive Planner — V3
 
-The Planner is the brain. It NEVER answers the user.
-It ONLY generates execution plans as structured JSON.
+The Planner is a pure intent analyzer. It is completely model-agnostic
+and agent-agnostic. It NEVER references specific agents, models, or tools.
 
-Uses Groq (Llama 3.3 70B) for sub-second JSON generation.
-Replaces the static keyword-based capability_analyzer for complex tasks.
-Falls back to fast-path rules for Level 0 (greetings/small talk).
+V3 changes:
+- Outputs only: Intent, Complexity, Capabilities, Constraints,
+  Required Outputs, Missing Information, Confidence
+- Adds a Clarification Loop: if critical info is missing, returns
+  a clarification request instead of guessing
+- Strips all agent/model awareness from the system prompt
+- The Capability Resolver (downstream) handles agent/model mapping
 
 Flow:
-    User Request → Planner LLM → JSON Plan → Plan Validator → Execution
+    User Request → Planner LLM → Plan Output → Plan Validator
+                                                     ↓
+                                           Capability Resolver
 """
 
 from __future__ import annotations
@@ -29,27 +35,24 @@ if env_path.exists():
 else:
     load_dotenv()
 
-from .agent_registry import AGENTS, get_agent
-from .model_registry import MODELS
-
 
 @dataclass
-class ExecutionPlan:
-    """Structured execution plan from the Planner."""
+class PlanOutput:
+    """
+    V3 Planner output — pure intent analysis.
+    Contains NO agent names, model names, or tool names.
+    """
     intent: str
-    complexity: int               # 0-4
-    confidence: float             # 0.0-1.0
+    complexity: int                   # 0-4
+    confidence: float                 # 0.0-1.0
     reasoning: str
-    capabilities: list[str]
-    agents: list[str]             # Agent names from registry
-    models: dict[str, str]        # agent_name → model_id
-    tools: list[str]
-    parallel_groups: list[list[str]]  # Groups of agents that can run in parallel
-    verification: bool
-    humanizer: bool
-    estimated_latency_ms: int
-    estimated_cost: float
-    planner_latency_ms: int
+    capabilities: list[str]           # e.g. ["architecture", "backend", "security"]
+    constraints: list[str]            # e.g. ["must use PostgreSQL", "REST only"]
+    required_outputs: list[str]       # e.g. ["code", "schema", "documentation"]
+    missing_information: list[str]    # e.g. ["database preference not specified"]
+    needs_clarification: bool         # If True, orchestrator should ask user
+    clarification_questions: list[str]  # Questions to ask the user
+    planner_latency_ms: int = 0
     planning_path: str = "primary"
 
 
@@ -72,7 +75,6 @@ IDENTITY_PATTERNS = [
 def _is_fast_path(prompt: str) -> bool:
     """Check if prompt is Level 0 (greeting/small talk/identity)."""
     lower = prompt.lower().strip()
-    # Very short prompts that match greeting patterns
     if len(lower.split()) <= 8:
         for pattern in GREETING_PATTERNS:
             if pattern in lower:
@@ -80,24 +82,21 @@ def _is_fast_path(prompt: str) -> bool:
     return False
 
 
-def _fast_path_plan(prompt: str) -> ExecutionPlan:
+def _fast_path_plan(prompt: str) -> PlanOutput:
     """Generate a Level 0 plan without any LLM call."""
     is_identity = any(p in prompt.lower() for p in IDENTITY_PATTERNS)
 
-    return ExecutionPlan(
+    return PlanOutput(
         intent="Identity" if is_identity else "Conversation",
         complexity=0,
         confidence=0.99,
         reasoning="Simple greeting/identity — fast path, no orchestration needed",
         capabilities=["conversation"],
-        agents=["conversation"],
-        models={"conversation": "llama-3.3-70b-versatile"},
-        tools=[],
-        parallel_groups=[["conversation"]],
-        verification=False,
-        humanizer=False,
-        estimated_latency_ms=500,
-        estimated_cost=0.0001,
+        constraints=[],
+        required_outputs=["text"],
+        missing_information=[],
+        needs_clarification=False,
+        clarification_questions=[],
         planner_latency_ms=0,
         planning_path="fast_path",
     )
@@ -108,64 +107,44 @@ def _fast_path_plan(prompt: str) -> ExecutionPlan:
 # =============================================================================
 
 PLANNER_SYSTEM_PROMPT = """You are the VEXORA Planning Intelligence Engine.
-You NEVER answer the user's question. You ONLY generate execution plans as JSON.
+You NEVER answer the user's question. You ONLY analyze intent and output a plan as JSON.
 
-Your job: Analyze the user's request and decide:
-1. What capabilities are needed
-2. Which specialist agents should handle it
-3. What models to use
-4. Which agents can run in parallel
-5. Whether verification is needed
-6. Whether humanization is needed
+Your job: Analyze the user's request and determine:
+1. What is the user's intent?
+2. How complex is this task? (0=greeting, 1=simple, 2=moderate, 3=complex, 4=enterprise)
+3. What capabilities are needed? (from: architecture, backend, frontend, database, security, testing, devops, documentation, ml, mobile, performance, refactoring, research, review, reasoning, conversation)
+4. What constraints does the user specify? (technology preferences, requirements)
+5. What outputs are expected? (code, schema, documentation, analysis, comparison)
+6. Is any critical information missing that would change the plan?
+7. How confident are you in this analysis?
 
-Available agents (use ONLY these names):
-{agents_list}
+IMPORTANT RULES:
+- Do NOT reference specific agent names, model names, or provider names.
+- Do NOT decide which agents or models to use — that is handled downstream.
+- Focus ONLY on understanding WHAT the user needs, not HOW to execute it.
+- If the request is ambiguous and could go in very different directions,
+  set needs_clarification=true and provide specific questions.
+- Only set needs_clarification=true for genuinely ambiguous requests,
+  NOT for simple or moderately clear tasks.
 
-Available model IDs (use ONLY these):
-{models_list}
-
-Complexity levels:
-0 = Greeting/small talk (already handled, you won't see these)
-1 = Simple explanation/definition (1 agent)
-2 = Coding task (2-4 agents)
-3 = Research task (2-3 agents)
-4 = Enterprise/complex system (5+ agents)
-
-Rules:
-- Select the MINIMUM effective team. Never use unnecessary agents.
-- For Level 1: Use only "reasoning" or "coder" agent.
-- For Level 2: Use domain agents + "reviewer". Add "verifier" only if code is complex.
-- For Level 3: Use "researcher" + "reasoning" + "reviewer".
-- For Level 4: Use "architect" + domain agents + "reviewer" + "verifier".
-- Never include "humanizer" as an agent — it runs separately.
-- Agents in the same parallel_group run concurrently.
-- Agents that depend on others' output must be in a LATER group.
-- "reviewer" always runs AFTER implementation agents.
-- "verifier" always runs AFTER "reviewer".
-- Choose models based on task needs: reasoning models for architecture, coding models for implementation, fast models for simple tasks.
-- For research tasks, recommend the "researcher" agent.
-
-You MUST return ONLY valid JSON matching this exact schema:
+You MUST return ONLY valid JSON matching this schema:
 {{
-  "intent": "string",
+  "intent": "string describing what the user wants",
   "complexity": 0,
   "confidence": 0.0,
-  "reasoning": "why this plan",
-  "capabilities": ["list"],
-  "agents": ["agent_names"],
-  "models": {{"agent_name": "model_id"}},
-  "tools": ["tool_names"],
-  "parallel_groups": [["group1_agents"], ["group2_agents"]],
-  "verification": true,
-  "humanizer": true,
-  "estimated_latency_ms": 5000,
-  "estimated_cost": 0.01
+  "reasoning": "why this analysis",
+  "capabilities": ["list of required capabilities"],
+  "constraints": ["list of user-specified constraints"],
+  "required_outputs": ["code", "schema", "documentation", etc.],
+  "missing_information": ["list of missing but important details"],
+  "needs_clarification": false,
+  "clarification_questions": []
 }}
 
 Return ONLY the JSON object. No markdown, no explanation, no code fences."""
 
 
-async def generate_plan(prompt: str) -> ExecutionPlan:
+async def generate_plan(prompt: str) -> PlanOutput:
     """
     Generate an execution plan for the given prompt.
     Uses fast-path for Level 0, LLM planning for Level 1-4.
@@ -176,12 +155,12 @@ async def generate_plan(prompt: str) -> ExecutionPlan:
 
     # LLM-based planning via Groq with fallbacks
     start = time.monotonic()
-    
+
     try:
         plan_json, planning_path = await _call_planner_llm(prompt)
     except Exception as e:
-        print(f"[PLANNER ERROR] All LLM fallbacks failed: {e}. Degrading to deterministic capability analyzer.")
-        # TERTIARY FALLBACK: Deterministic keyword analyzer
+        print(f"[PLANNER ERROR] All LLM fallbacks failed: {e}. Degrading to deterministic analyzer.")
+        # DETERMINISTIC FALLBACK
         from .capability_analyzer import analyze
         analysis = analyze(prompt)
         plan_json = {
@@ -190,17 +169,14 @@ async def generate_plan(prompt: str) -> ExecutionPlan:
             "confidence": 0.4,
             "reasoning": "Deterministic fallback used due to LLM planning outage.",
             "capabilities": analysis.capabilities,
-            "agents": ["coder", "researcher"] if "research" in analysis.capabilities else ["coder"],
-            "models": {"coder": "gemini-flash"},
-            "tools": [],
-            "parallel_groups": [["coder"]],
-            "verification": analysis.requires_verification,
-            "humanizer": analysis.requires_humanization,
-            "estimated_latency_ms": 3000,
-            "estimated_cost": 0.0
+            "constraints": [],
+            "required_outputs": ["code"] if "coding" in analysis.capabilities else ["text"],
+            "missing_information": ["LLM planner unavailable — using keyword analysis"],
+            "needs_clarification": False,
+            "clarification_questions": [],
         }
         planning_path = "deterministic"
-        
+
     planner_latency = int((time.monotonic() - start) * 1000)
 
     # Parse and validate
@@ -212,29 +188,14 @@ async def generate_plan(prompt: str) -> ExecutionPlan:
 
 
 async def _call_planner_llm(prompt: str) -> tuple[dict, str]:
-    """Call Groq API to generate the execution plan, with OpenRouter and Gemini fallbacks."""
+    """Call Groq API to generate the plan, with OpenRouter and Gemini fallbacks."""
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY not configured for planner")
 
-    # Build context about available agents and models
-    agents_list = "\n".join(
-        f"  - {name}: {a.display_name} (capabilities: {', '.join(a.capabilities)})"
-        for name, a in AGENTS.items()
-        if "orchestration" not in a.tags and "internal" not in a.tags
-    )
-    models_list = "\n".join(
-        f"  - {mid}: {m.name} (provider: {m.provider}, capabilities: {', '.join(m.capabilities)})"
-        for mid, m in MODELS.items()
-        if m.is_available
-    )
-
     from .executor import VEXORA_IDENTITY_PREFIX
-    system = VEXORA_IDENTITY_PREFIX + PLANNER_SYSTEM_PROMPT.format(
-        agents_list=agents_list,
-        models_list=models_list,
-    )
-    
+    system = VEXORA_IDENTITY_PREFIX + PLANNER_SYSTEM_PROMPT
+
     planning_path = "primary"
 
     try:
@@ -246,7 +207,7 @@ async def _call_planner_llm(prompt: str) -> tuple[dict, str]:
                     "model": "llama-3.3-70b-versatile",
                     "messages": [
                         {"role": "system", "content": system},
-                        {"role": "user", "content": f"Generate an execution plan for this user request:\n\n{prompt}"},
+                        {"role": "user", "content": f"Analyze this user request and generate a plan:\n\n{prompt}"},
                     ],
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"},
@@ -256,10 +217,9 @@ async def _call_planner_llm(prompt: str) -> tuple[dict, str]:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
     except Exception as e:
-        # Check if it's a rate limit or timeout on primary
         planning_path = "secondary"
-        print(f"[PLANNER WARN] Groq failed ({e}). Falling back to OpenRouter Gemini.")
-        
+        print(f"[PLANNER WARN] Groq failed ({e}). Falling back to OpenRouter.")
+
         try:
             openrouter_key = os.getenv("OPENROUTER_API_KEY")
             if not openrouter_key:
@@ -272,7 +232,7 @@ async def _call_planner_llm(prompt: str) -> tuple[dict, str]:
                         "model": "google/gemini-2.5-pro",
                         "messages": [
                             {"role": "system", "content": system},
-                            {"role": "user", "content": f"Generate an execution plan for this user request:\n\n{prompt}"}
+                            {"role": "user", "content": f"Analyze this user request and generate a plan:\n\n{prompt}"}
                         ],
                         "temperature": 0.1,
                         "max_tokens": 1000,
@@ -296,7 +256,7 @@ async def _call_planner_llm(prompt: str) -> tuple[dict, str]:
                             "parts": [{"text": system}]
                         },
                         "contents": [{
-                            "parts": [{"text": f"Generate an execution plan for this user request:\n\n{prompt}"}]
+                            "parts": [{"text": f"Analyze this user request and generate a plan:\n\n{prompt}"}]
                         }],
                         "generationConfig": {
                             "temperature": 0.1,
@@ -312,78 +272,51 @@ async def _call_planner_llm(prompt: str) -> tuple[dict, str]:
     try:
         return json.loads(content), planning_path
     except json.JSONDecodeError:
-        # Try to extract JSON from markdown code blocks
         match = re.search(r"```(?:json)?\s*\n?(.*?)```", content, re.DOTALL)
         if match:
             return json.loads(match.group(1)), planning_path
         raise ValueError(f"Planner returned invalid JSON: {content[:200]}")
 
 
-def _parse_plan(raw: dict, planner_latency_ms: int) -> ExecutionPlan:
-    """Parse raw JSON into ExecutionPlan dataclass."""
-    return ExecutionPlan(
+def _parse_plan(raw: dict, planner_latency_ms: int) -> PlanOutput:
+    """Parse raw JSON into PlanOutput dataclass."""
+    return PlanOutput(
         intent=raw.get("intent", "Unknown"),
         complexity=int(raw.get("complexity", 2)),
         confidence=float(raw.get("confidence", 0.7)),
         reasoning=raw.get("reasoning", ""),
         capabilities=raw.get("capabilities", []),
-        agents=raw.get("agents", []),
-        models=raw.get("models", {}),
-        tools=raw.get("tools", []),
-        parallel_groups=raw.get("parallel_groups", []),
-        verification=raw.get("verification", True),
-        humanizer=raw.get("humanizer", False),
-        estimated_latency_ms=raw.get("estimated_latency_ms", 5000),
-        estimated_cost=raw.get("estimated_cost", 0.01),
+        constraints=raw.get("constraints", []),
+        required_outputs=raw.get("required_outputs", []),
+        missing_information=raw.get("missing_information", []),
+        needs_clarification=raw.get("needs_clarification", False),
+        clarification_questions=raw.get("clarification_questions", []),
         planner_latency_ms=planner_latency_ms,
     )
 
 
-def _validate_plan(plan: ExecutionPlan) -> ExecutionPlan:
+def _validate_plan(plan: PlanOutput) -> PlanOutput:
     """
-    Validate the plan against registries.
-    Auto-repair hallucinated agents/models.
+    Validate the plan output.
+    Clamp complexity, ensure at least one capability, etc.
     """
-    # Validate agents exist
-    valid_agents = []
-    for agent_name in plan.agents:
-        if get_agent(agent_name):
-            valid_agents.append(agent_name)
-        else:
-            print(f"[PLANNER WARN] Agent '{agent_name}' not in registry — skipped")
-    plan.agents = valid_agents if valid_agents else ["coder"]
-
-    # Validate models exist
-    valid_models = {}
-    for agent_name, model_id in plan.models.items():
-        if agent_name in plan.agents:
-            if model_id in MODELS:
-                valid_models[agent_name] = model_id
-            else:
-                # Fallback to Groq Llama
-                valid_models[agent_name] = "llama-3.3-70b-versatile"
-                print(f"[PLANNER WARN] Model '{model_id}' not in registry — using fallback")
-    # Ensure every agent has a model
-    for agent_name in plan.agents:
-        if agent_name not in valid_models:
-            valid_models[agent_name] = "llama-3.3-70b-versatile"
-    plan.models = valid_models
-
-    # Validate parallel groups — only include valid agents
-    valid_groups = []
-    assigned = set()
-    for group in plan.parallel_groups:
-        valid_group = [a for a in group if a in plan.agents and a not in assigned]
-        if valid_group:
-            valid_groups.append(valid_group)
-            assigned.update(valid_group)
-    # Add any unassigned agents as a final sequential group
-    unassigned = [a for a in plan.agents if a not in assigned]
-    if unassigned:
-        valid_groups.append(unassigned)
-    plan.parallel_groups = valid_groups if valid_groups else [plan.agents]
-
     # Clamp complexity
     plan.complexity = max(0, min(4, plan.complexity))
+
+    # Ensure at least one capability
+    if not plan.capabilities:
+        plan.capabilities = ["conversation"]
+
+    # Validate capability names against known set
+    known_capabilities = {
+        "architecture", "backend", "frontend", "database", "security",
+        "testing", "devops", "documentation", "ml", "mobile",
+        "performance", "refactoring", "research", "review",
+        "reasoning", "conversation",
+    }
+    valid_caps = [c for c in plan.capabilities if c in known_capabilities]
+    if not valid_caps:
+        valid_caps = ["reasoning"]
+    plan.capabilities = valid_caps
 
     return plan

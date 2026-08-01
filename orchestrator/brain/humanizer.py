@@ -85,51 +85,129 @@ def _extract_agent_sections(combined: str) -> dict[str, str]:
     return sections
 
 
+# V4.1 — Editorial Engine system prompt (strict preservation constraints)
+_HUMANIZER_SYSTEM = (
+    "You are VEXORA's Editorial Engine — an elite technical editor.\n"
+    "Your ONLY job is presentation. Merge and polish the agent outputs below into ONE cohesive, readable response.\n\n"
+    "RULES:\n"
+    "✓ Professional, natural writing with smooth transitions\n"
+    "✓ Remove robotic filler and duplicate wording\n"
+    "✓ Preserve EVERY code block exactly as written\n"
+    "✓ Preserve EVERY architectural decision and reasoning chain\n"
+    "✓ Preserve EVERY citation and source URL\n"
+    "✓ Preserve ALL technical facts and specifics\n\n"
+    "CONSTRAINTS:\n"
+    "✗ Do NOT redesign or rewrite architecture\n"
+    "✗ Do NOT optimize or change code logic\n"
+    "✗ Do NOT invent new information\n"
+    "✗ Do NOT remove technical details\n"
+    "✗ Do NOT add disclaimers about being an AI\n\n"
+    "Output ONLY the final polished markdown response."
+)
+
+
+def _get_humanizer_model():
+    """Select the best available model for humanization using the model router."""
+    from .model_registry import best_models, get_model
+
+    # Try writing-optimized models first
+    candidates = best_models("writing", limit=3)
+    if candidates:
+        return candidates[0]
+
+    # Fall back to general capability
+    candidates = best_models("general", limit=3)
+    if candidates:
+        return candidates[0]
+
+    # Absolute fallback
+    return get_model("llama-3.3-70b-versatile")
+
+
 async def _structural_merge(sections: dict[str, str], task: str) -> str:
     """
     Merge multiple agent outputs into one cohesive response using an LLM.
-    - Combines sections logically
-    - Removes duplicate headings/content
-    - Preserves all code blocks and technical specifics
+    V4.1: Uses model router instead of hardcoded model IDs.
     """
     from .executor import get_adapter, VEXORA_IDENTITY_PREFIX
-    from .model_registry import get_model
 
-    system = VEXORA_IDENTITY_PREFIX + (
-        "You are the Humanizer. Your job is to merge multiple agent outputs into ONE cohesive, readable response. "
-        "Remove duplication. Preserve all technical specifics and code blocks. "
-        "Do NOT summarize away details. Do NOT re-explain what was already said. Output ONLY the final markdown response."
-    )
+    system = VEXORA_IDENTITY_PREFIX + _HUMANIZER_SYSTEM
 
     prompt = f"Original User Task: {task}\n\nAgent Outputs to Merge:\n"
     for agent_name, content in sections.items():
         prompt += f"\n--- {agent_name} output ---\n{content}\n"
 
+    model = _get_humanizer_model()
+    if not model:
+        # No models available — fall back to text concatenation
+        return _clean_output("\n\n".join(sections.values()))
+
     try:
-        # Primary: Groq for fast merging
-        model = get_model("llama-3.3-70b-versatile")
-        if not model:
-            raise ValueError("Primary model not found")
         adapter = get_adapter(model.provider)
         res = await adapter.generate(prompt, model, system)
         return _clean_output(res.content)
     except Exception as e:
-        print(f"[HUMANIZER WARN] Primary Groq merge failed ({e}). Falling back to OpenRouter.")
+        print(f"[HUMANIZER WARN] Primary merge failed ({e}). Trying fallback.")
+        # Try a different provider
+        from .model_registry import best_models
+        candidates = best_models("general", limit=5)
+        for cand in candidates:
+            if cand.provider != model.provider:
+                try:
+                    adapter = get_adapter(cand.provider)
+                    res = await adapter.generate(prompt, cand, system)
+                    return _clean_output(res.content)
+                except Exception:
+                    continue
+        # All providers failed — raw concatenation
+        print("[HUMANIZER ERROR] All providers failed. Using raw concatenation.")
+        return _clean_output("\n\n".join(sections.values()))
+
+
+async def humanize_stream(combined_output: str, task: str, agent_count: int = 1):
+    """
+    V4.1 Streaming Humanizer — yields tokens as they are generated.
+    
+    For single-agent output: yields the cleaned text in one chunk (no LLM call).
+    For multi-agent output: streams the editorial merge via generate_stream().
+    
+    Usage in main.py:
+        async for chunk in humanize_stream(combined, task, agent_count):
+            await send_sse({"type": "chunk", "text": chunk})
+    """
+    from .executor import get_adapter, VEXORA_IDENTITY_PREFIX
+
+    agent_sections = _extract_agent_sections(combined_output)
+
+    if len(agent_sections) <= 1:
+        # Single agent — return directly, no LLM call
+        content = _clean_output(combined_output)
+        content = re.sub(r"---\s+\S+\s+output\s+---\n?", "", content).strip()
+        yield content
+        return
+
+    # Multi-agent — stream the editorial merge
+    system = VEXORA_IDENTITY_PREFIX + _HUMANIZER_SYSTEM
+    prompt = f"Original User Task: {task}\n\nAgent Outputs to Merge:\n"
+    for agent_name, content in agent_sections.items():
+        prompt += f"\n--- {agent_name} output ---\n{content}\n"
+
+    model = _get_humanizer_model()
+    if not model:
+        yield _clean_output("\n\n".join(agent_sections.values()))
+        return
+
+    try:
+        adapter = get_adapter(model.provider)
+        async for chunk in adapter.generate_stream(prompt, model, system):
+            yield chunk
+    except Exception as e:
+        print(f"[HUMANIZER STREAM ERROR] {e}. Falling back to non-streaming.")
         try:
-            # Secondary: OpenRouter
-            model = get_model("google/gemini-2.5-pro")
-            if not model:
-                raise ValueError("Secondary model not found")
-            adapter = get_adapter(model.provider)
             res = await adapter.generate(prompt, model, system)
-            return _clean_output(res.content)
-        except Exception as e2:
-            print(f"[HUMANIZER ERROR] Secondary OpenRouter failed ({e2}). Falling back to text concatenation.")
-            merged_parts = []
-            for agent_name, content in sections.items():
-                merged_parts.append(content)
-            merged = "\n\n".join(merged_parts)
-            return _clean_output(merged)
+            yield _clean_output(res.content)
+        except Exception:
+            yield _clean_output("\n\n".join(agent_sections.values()))
 
 
 def humanize_plan(plan: dict) -> str:
