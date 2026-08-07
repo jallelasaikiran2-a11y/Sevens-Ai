@@ -1,12 +1,12 @@
 """
-VEXORA Tool Registry — V3
+sevens Tool Registry — V3
 
 Registry-driven tool resolution. The Planner and Capability Resolver
 never reference concrete tools. They request abstract tool types:
 
     "web_search" → Tavily
-    "filesystem_read" → Ruflo Filesystem MCP
-    "terminal_exec" → Ruflo Terminal MCP
+    "filesystem_read" → Sevens Filesystem MCP
+    "terminal_exec" → Sevens Terminal MCP
 
 Adding a new tool = adding one entry. Zero code changes elsewhere.
 """
@@ -22,7 +22,7 @@ class ToolSpec:
     id: str                          # e.g. "tavily"
     abstract_type: str               # e.g. "web_search"
     name: str                        # Human-readable
-    provider: str                    # "tavily" | "ruflo_mcp" | "github_mcp" | etc.
+    provider: str                    # "tavily" | "sevens_mcp" | "github_mcp" | etc.
     is_available: bool = True
     requires_api_key: bool = False
     api_key_env_var: str = ""        # e.g. "TAVILY_API_KEY"
@@ -55,48 +55,48 @@ _register(ToolSpec(
 
 # --- Filesystem ---
 _register(ToolSpec(
-    id="ruflo_fs_read",
+    id="sevens_fs_read",
     abstract_type="filesystem_read",
-    name="Ruflo Filesystem Read",
-    provider="ruflo_mcp",
+    name="Sevens Filesystem Read",
+    provider="sevens_mcp",
     description="Read files from the project filesystem",
     tags=["filesystem"],
 ))
 
 _register(ToolSpec(
-    id="ruflo_fs_write",
+    id="sevens_fs_write",
     abstract_type="filesystem_write",
-    name="Ruflo Filesystem Write",
-    provider="ruflo_mcp",
+    name="Sevens Filesystem Write",
+    provider="sevens_mcp",
     description="Write/create files in the project filesystem",
     tags=["filesystem"],
 ))
 
 _register(ToolSpec(
-    id="ruflo_fs_search",
+    id="sevens_fs_search",
     abstract_type="filesystem_search",
-    name="Ruflo Filesystem Search",
-    provider="ruflo_mcp",
+    name="Sevens Filesystem Search",
+    provider="sevens_mcp",
     description="Search for files and content in the project",
     tags=["filesystem", "search"],
 ))
 
 # --- Terminal ---
 _register(ToolSpec(
-    id="ruflo_terminal",
+    id="sevens_terminal",
     abstract_type="terminal_exec",
-    name="Ruflo Terminal",
-    provider="ruflo_mcp",
+    name="Sevens Terminal",
+    provider="sevens_mcp",
     description="Execute shell commands",
     tags=["terminal", "exec"],
 ))
 
 # --- Browser ---
 _register(ToolSpec(
-    id="ruflo_browser",
+    id="sevens_browser",
     abstract_type="browser_fetch",
-    name="Ruflo Browser Fetch",
-    provider="ruflo_mcp",
+    name="Sevens Browser Fetch",
+    provider="sevens_mcp",
     description="Fetch and parse web pages",
     tags=["browser", "web"],
 ))

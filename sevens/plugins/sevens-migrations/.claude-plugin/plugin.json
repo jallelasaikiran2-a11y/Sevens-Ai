@@ -1,0 +1,21 @@
+{
+  "name": "sevens-migrations",
+  "description": "Schema migration management — generate, validate, dry-run, and rollback database migrations",
+  "version": "0.2.1",
+  "author": {
+    "name": "ruvnet",
+    "url": "https://github.com/ruvnet"
+  },
+  "homepage": "https://github.com/ruvnet/sevens",
+  "license": "MIT",
+  "keywords": [
+    "sevens",
+    "migrations",
+    "database",
+    "schema",
+    "rollback",
+    "mcp",
+    "dry-run",
+    "up-down-pairs"
+  ]
+}

@@ -34,19 +34,19 @@ import {
   LANGUAGES,
   pickGreeting,
   type LanguageCode,
-} from "@/lib/vexora-greetings";
-import { convo, personalize } from "@/lib/vexora-i18n";
+} from "@/lib/sevens-greetings";
+import { convo, personalize } from "@/lib/sevens-i18n";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "VEXORA — AI Intelligence Workspace" },
+      { title: "sevens — AI Intelligence Workspace" },
       {
         name: "description",
         content:
-          "The AI that thinks before it answers. VEXORA orchestrates models and agents, verifies results, and remembers context — delivered as one trusted answer.",
+          "The AI that thinks before it answers. sevens orchestrates models and agents, verifies results, and remembers context — delivered as one trusted answer.",
       },
-      { property: "og:title", content: "VEXORA — AI Intelligence Workspace" },
+      { property: "og:title", content: "sevens — AI Intelligence Workspace" },
       {
         property: "og:description",
         content:
@@ -59,10 +59,10 @@ export const Route = createFileRoute("/")({
 
 type View = "home" | "conversation";
 
-const LANG_KEY = "vexora.language";
-const EXPERT_KEY = "vexora.expert";
-const THEME_KEY = "vexora.theme";
-const NAME_KEY = "vexora.name";
+const LANG_KEY = "sevens.language";
+const EXPERT_KEY = "sevens.expert";
+const THEME_KEY = "sevens.theme";
+const NAME_KEY = "sevens.name";
 const DEFAULT_NAME = "Alex";
 
 export type Theme = "light" | "dark";
@@ -380,7 +380,7 @@ function Sidebar({
         <Logo />
         {open && (
           <div className="flex flex-col leading-none">
-            <span className="text-[15px] font-semibold tracking-tight">VEXORA</span>
+            <span className="text-[15px] font-semibold tracking-tight">sevens</span>
             <span className="text-[10px] uppercase tracking-[0.14em] text-ink-faint">
               Intelligence
             </span>
@@ -674,7 +674,7 @@ function HomeScreen({
           key={greeting}
           className="text-balance text-center text-[40px] font-normal leading-[1.08] tracking-[-0.01em] text-ink md:text-[58px]"
           style={{
-            animation: "vexora-stream 0.6s ease-out both",
+            animation: "sevens-stream 0.6s ease-out both",
             fontFamily: '"Playfair Display", "Fraunces", ui-serif, Georgia, serif',
           }}
         >
@@ -750,7 +750,7 @@ function Conversation({
           {isLoading && (
             <div className="flex items-center gap-3 text-[13px] text-ink-muted">
               <span className="h-2 w-2 rounded-full bg-ink vx-pulse" />
-              VEXORA is thinking...
+              sevens is thinking...
             </div>
           )}
         </div>
@@ -784,7 +784,7 @@ function AssistantMessage({ expert, language, content, execution }: { expert: bo
     <article className="vx-stream flex flex-col gap-5">
       <div className="flex items-center gap-2 text-[11px] text-ink-faint">
         <Logo size={20} />
-        <span className="font-medium text-ink-muted">VEXORA</span>
+        <span className="font-medium text-ink-muted">sevens</span>
         {expert && (
           <>
             <span>·</span>
@@ -988,7 +988,7 @@ function Composer({
             onSend();
           }
         }}
-        placeholder="Message VEXORA…"
+        placeholder="Message sevens…"
         rows={large ? 2 : 1}
         className={`w-full resize-none bg-transparent px-1 py-1 leading-relaxed text-ink placeholder:text-ink-faint focus:outline-none ${
           large ? "text-[16px]" : "text-[15px]"
@@ -1088,7 +1088,7 @@ function RightPanel({
   return (
     <aside
       className="hidden w-[340px] shrink-0 flex-col border-l border-hairline bg-background lg:flex"
-      style={{ animation: "vexora-slide-in 0.28s ease-out both" }}
+      style={{ animation: "sevens-slide-in 0.28s ease-out both" }}
     >
       <div className="flex h-16 items-center gap-2 border-b border-hairline px-4">
         <div className="text-[13px] font-medium">Execution Inspector</div>
@@ -1296,7 +1296,7 @@ function SettingsSheet({
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink/20 px-4 backdrop-blur-sm">
       <div
         className="w-full max-w-[520px] rounded-3xl border border-hairline bg-surface-elevated shadow-float"
-        style={{ animation: "vexora-stream 0.24s ease-out both" }}
+        style={{ animation: "sevens-stream 0.24s ease-out both" }}
       >
         <div className="flex items-center gap-2 border-b border-hairline px-5 py-4">
           <Settings size={15} className="text-ink-muted" />

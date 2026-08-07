@@ -1,5 +1,5 @@
 """
-VEXORA Memory Manager — V3
+sevens Memory Manager — V3
 
 Three memory scopes:
 
@@ -378,7 +378,7 @@ class ConversationMemory:
         recent = self.turns[-max_turns:] if len(self.turns) > max_turns else self.turns
         lines = ["## Conversation History"]
         for turn in recent:
-            prefix = "User" if turn.role == "user" else "VEXORA"
+            prefix = "User" if turn.role == "user" else "sevens"
             # Truncate long content
             content = turn.content[:300] + "..." if len(turn.content) > 300 else turn.content
             lines.append(f"**{prefix}:** {content}")

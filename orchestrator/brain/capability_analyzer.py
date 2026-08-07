@@ -1,5 +1,5 @@
 """
-VEXORA Capability Analyzer
+sevens Capability Analyzer
 
 Extracts CAPABILITIES from a user prompt — not just keywords.
 
@@ -35,12 +35,22 @@ class CapabilityAnalysis:
 # Each rule maps keywords → capabilities. A single prompt can trigger many.
 
 CAPABILITY_RULES: list[dict] = [
+    # --- Reasoning (Low/Medium complexity bypass) ---
+    {
+        "capability": "reasoning",
+        "keywords": [
+            "explain", "what is", "how does", "why is", "tell me about",
+            "summarize", "analyze", "break down", "jwt", "token", "concept",
+        ],
+        "domain_hint": "general",
+    },
     # --- Conversation (Low complexity bypass) ---
     {
         "capability": "conversation",
         "keywords": [
             "hello", "hi", "hey", "how are you", "what's up", "good morning",
             "good evening", "thanks", "thank you", "bye", "goodbye", "help",
+            "joke", "translate", "funny", "who are you",
         ],
         "domain_hint": "general",
     },
@@ -52,6 +62,7 @@ CAPABILITY_RULES: list[dict] = [
             "saas", "platform", "scalable", "distributed", "event-driven",
             "infrastructure", "schema", "erd", "database design", "api design",
             "production", "enterprise", "high availability", "load balancer",
+            "build netflix", "netflix architecture",
         ],
         "domain_hint": "web",
     },
@@ -126,7 +137,7 @@ CAPABILITY_RULES: list[dict] = [
         "keywords": [
             "document", "documentation", "readme", "wiki", "api docs",
             "swagger", "openapi", "changelog", "guide", "tutorial",
-            "explain", "describe", "write", "specification", "spec",
+            "describe", "write", "specification", "spec",
         ],
         "domain_hint": "docs",
     },

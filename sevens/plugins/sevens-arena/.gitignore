@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.sevens/
+*.tsbuildinfo
+# Lockfile is regenerated inside the sevens workspace; an isolated install pulls peer deps.
+package-lock.json

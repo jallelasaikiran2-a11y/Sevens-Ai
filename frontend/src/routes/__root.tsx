@@ -77,14 +77,14 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "VEXORA — The AI that thinks before it answers" },
+      { title: "sevens — The AI that thinks before it answers" },
       {
         name: "description",
         content:
-          "VEXORA is an AI Super Intelligence Workspace that understands intent, orchestrates the best models and agents, verifies results, and delivers one trusted answer.",
+          "sevens is an AI Super Intelligence Workspace that understands intent, orchestrates the best models and agents, verifies results, and delivers one trusted answer.",
       },
-      { name: "author", content: "VEXORA" },
-      { property: "og:title", content: "VEXORA — AI Intelligence Workspace" },
+      { name: "author", content: "sevens" },
+      { property: "og:title", content: "sevens — AI Intelligence Workspace" },
       {
         property: "og:description",
         content:

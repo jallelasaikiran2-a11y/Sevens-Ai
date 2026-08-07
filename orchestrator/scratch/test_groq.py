@@ -3,7 +3,7 @@ import os
 import asyncio
 from dotenv import load_dotenv
 
-load_dotenv(r"d:\vexora intelligence\.env")
+load_dotenv(r"d:\Sevens ai\.env")
 api_key = os.getenv("GROQ_API_KEY")
 
 async def test_groq():

@@ -12,18 +12,78 @@ from brain.agent_registry import AGENTS
 
 async def verify_providers():
     print("\n" + "="*50)
-    print("VEXORA — Boot-time API Key Validation")
+    print("sevens — Boot-time API Key Validation")
     print("="*50)
     providers_to_test = {
         "groq": "llama-3.3-70b-versatile",
-        "openrouter": "google/gemini-2.5-flash",
-        "gemini": "gemini-2.0-flash"
+        "gemini": "gemini-2.0-flash",
+        # OpenRouter will be handled specially below
     }
     
     healthy_providers = 0
+    total_providers_tested = 0
     agents_ok = True
+
+    # 1. Test OpenRouter Tier 1 (paid-trial) and Tier 2 (free) explicitly
+    print("Testing OPENROUTER API...")
+    total_providers_tested += 1
+    or_tier1_id = "google/gemini-2.5-flash"
+    or_tier2_id = "openai/gpt-oss-20b:free"
     
+    tier1_spec = get_model(or_tier1_id)
+    tier2_spec = get_model(or_tier2_id)
+    
+    or_adapter = get_adapter("openrouter")
+    or_healthy = False
+    
+    if not tier1_spec or not tier2_spec:
+        print("  [ERROR] OpenRouter Tier 1 or Tier 2 default models missing from registry!")
+        _disable_provider("openrouter")
+    else:
+        # Try Tier 1
+        try:
+            res = await or_adapter.generate("Reply exactly with the word 'OK'", tier1_spec, "You are a helpful assistant.")
+            if res and res.content:
+                print(f"  [OK] OpenRouter is live (latency: {res.latency}ms)")
+                if res.model == tier1_spec.id:
+                    print("  [INFO] OpenRouter Tier 1 credits available.")
+                else:
+                    print(f"  [WARN] OpenRouter Tier 1 exhausted. Served by Tier 2 fallback ({res.model}).")
+                healthy_providers += 1
+                or_healthy = True
+            else:
+                print("  [ERROR] OpenRouter Tier 1 returned empty response")
+        except Exception as e:
+            import httpx
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (401, 402, 429):
+                if e.response.status_code == 401:
+                    print("  [WARN] OpenRouter returned 401 Unauthorized. Key might be invalid, but keeping online.")
+                    healthy_providers += 1
+                    or_healthy = True
+                elif e.response.status_code in (402, 429):
+                    reason = "no credits" if e.response.status_code == 402 else "rate-limited"
+                    print(f"  [WARN] OpenRouter Tier 1 exhausted ({reason}). Testing Tier 2 free models...")
+                    # Try Tier 2
+                    try:
+                        res2 = await or_adapter.generate("Reply exactly with the word 'OK'", tier2_spec, "You are a helpful assistant.")
+                        if res2 and res2.content:
+                            print(f"  [OK] OpenRouter Tier 2 is live (latency: {res2.latency}ms)")
+                            print("  [WARN] OpenRouter Tier 1 exhausted, using Tier 2 free models.")
+                            healthy_providers += 1
+                            or_healthy = True
+                        else:
+                            print("  [ERROR] OpenRouter Tier 2 returned empty response")
+                    except Exception as e2:
+                        print(f"  [ERROR] OpenRouter Tier 2 also failed: {type(e2).__name__} - {e2}")
+            else:
+                print(f"  [ERROR] OpenRouter failed: {type(e).__name__} - {e}")
+                
+        if not or_healthy:
+            _disable_provider("openrouter")
+    
+    # 2. Test other providers
     for provider, model_id in providers_to_test.items():
+        total_providers_tested += 1
         print(f"Testing {provider.upper()} API...")
         model_spec = get_model(model_id)
         if not model_spec:
@@ -87,7 +147,7 @@ async def verify_providers():
         print("[FATAL] Agents cannot resolve required capabilities. Cannot start.")
         sys.exit(1)
     else:
-        print(f"[OK] {healthy_providers}/{len(providers_to_test)} providers verified. Backend starting.")
+        print(f"[OK] {healthy_providers}/{total_providers_tested} providers verified. Backend starting.")
 
 def _disable_provider(provider: str):
     """Disable all models for a provider that failed verification."""

@@ -1,5 +1,5 @@
 """
-VEXORA Execution Context Builder — V3
+sevens Execution Context Builder — V3
 
 Sits between the Registries and the Execution Graph Builder.
 
@@ -75,6 +75,9 @@ def build_execution_context(
     - This function resolves HOW to execute (concrete agents, models, tools)
     """
     assignments: list[AgentAssignment] = []
+    
+    # Track provider usage in this request for load balancing
+    used_providers: dict[str, int] = {}
 
     for agent_type in requirements.agent_types:
         # 1. Resolve agent from registry
@@ -86,8 +89,8 @@ def build_execution_context(
         # 2. Determine what model capability this agent needs
         model_cap = requirements.model_capabilities.get(agent_type, "general")
 
-        # 3. Find the best available model for that capability
-        model_spec = _select_best_model(model_cap)
+        # 3. Find the best available model for that capability, balancing providers
+        model_spec = _select_best_model(model_cap, used_providers)
         if not model_spec:
             print(f"[CONTEXT BUILDER WARN] No model for capability '{model_cap}', using fallback")
             model_spec = get_model("llama-3.3-70b-versatile")
@@ -151,19 +154,25 @@ def build_execution_context(
     )
 
 
-def _select_best_model(capability: str) -> ModelSpec | None:
+def _select_best_model(capability: str, used_providers: dict[str, int]) -> ModelSpec | None:
     """
-    Select the best available model for a given capability.
-    Returns the highest-quality available model.
+    Select the best available model for a given capability, distributing load
+    across providers to prevent rate limits (e.g., 429 Too Many Requests).
     """
-    candidates = best_models(capability, limit=3)
-    if candidates:
-        return candidates[0]
-
-    # Broaden: try "coding" as universal fallback
-    candidates = best_models("coding", limit=3)
-    if candidates:
-        return candidates[0]
-
-    # Last resort
-    return get_model("llama-3.3-70b-versatile")
+    candidates = best_models(capability, limit=5)
+    
+    if not candidates:
+        # Broaden: try "coding" as universal fallback
+        candidates = best_models("coding", limit=5)
+        
+    if not candidates:
+        return get_model("llama-3.3-70b-versatile")
+        
+    # Sort candidates to prefer providers with lower current usage in this request,
+    # while still respecting quality tier. We heavily penalize providers already used
+    # to enforce load balancing across the agent swarm.
+    candidates.sort(key=lambda m: (used_providers.get(m.provider, 0), -m.quality_tier, m.cost_per_1m_input))
+    
+    selected = candidates[0]
+    used_providers[selected.provider] = used_providers.get(selected.provider, 0) + 1
+    return selected

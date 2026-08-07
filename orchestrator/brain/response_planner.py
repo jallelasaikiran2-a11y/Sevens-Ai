@@ -1,5 +1,5 @@
 """
-VEXORA Response Planner — V4.1
+sevens Response Planner — V4.1
 
 Sits between Combiner and Humanizer.
 Generates a fast, lightweight Response Outline (Markdown skeleton)
@@ -27,7 +27,7 @@ class ResponsePlan:
     raw_outline: str = ""
 
 
-RESPONSE_PLANNER_PROMPT = """You are VEXORA's Response Planning Engine.
+RESPONSE_PLANNER_PROMPT = """You are sevens's Response Planning Engine.
 Your SOLE job is to look at the user prompt and the outputs from multiple specialized agents, and plan the structure of the final answer.
 
 Output a clean Markdown skeleton outline outlining the logical sections for the final response.

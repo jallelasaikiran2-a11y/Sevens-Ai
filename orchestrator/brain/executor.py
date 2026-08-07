@@ -1,13 +1,20 @@
 """
-VEXORA Executor
+sevens Executor — V5 (Fugu-style MoA)
 
 Directly executes AI models using provider adapters.
-Bypasses the Ruflo CLI for execution, acting as the real execution engine.
+Bypasses the Sevens CLI for execution, acting as the real execution engine.
+
+V5 additions:
+- Ensemble execution: dispatch same prompt to N models in parallel,
+  synthesize via a reconciliation model (Mixture-of-Agents pattern).
+- LLM-based verification critique (Layer 2).
+- Recursive re-planning on low confidence.
 
 Supports:
-- Direct model calls via OpenRouter and Gemini API
+- Direct model calls via OpenRouter, Gemini, and Groq APIs
 - Parallel agent execution within a stage via asyncio
-- Fallback/Retry logic (OpenRouter -> Gemini)
+- Ensemble multi-model execution with synthesis
+- Fallback/Retry logic with full candidate exhaustion
 - System prompts tailored for specific agent roles
 """
 
@@ -17,13 +24,31 @@ import json as json_mod
 import os
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, Optional
 
 import httpx
 
 from .dag_builder import ExecutionDAG
 from .model_registry import get_model, ModelSpec
+
+
+# =============================================================================
+# Ensemble Configuration (Fugu-style MoA)
+# =============================================================================
+
+# How many models to run in parallel for ensemble-qualified subtasks.
+ENSEMBLE_WIDTH = 3
+
+# Minimum planner complexity level to trigger ensemble mode.
+ENSEMBLE_COMPLEXITY_THRESHOLD = 2
+
+# Agent capabilities that qualify for ensemble execution.
+ENSEMBLE_CAPABILITIES = {"coding", "reasoning", "architecture", "security"}
+
+# Model used for the synthesis/reconciliation step.
+# Should be a free model to keep cost low since it only merges N outputs.
+ENSEMBLE_SYNTHESIS_MODEL = "openai/gpt-oss-20b:free"
 
 
 @dataclass
@@ -39,6 +64,11 @@ class AgentResult:
     provider_used: str = ""
     tokens: int = 0
     cost: float = 0.0
+    # V5 Ensemble fields (populated only when ensemble mode is used)
+    was_ensemble: bool = False
+    ensemble_outputs: list[dict] = field(default_factory=list)  # [{"model": ..., "output": ..., "tokens": ..., "cost": ...}]
+    synthesis_model: str = ""
+    ensemble_agreement: float = 1.0  # 0.0-1.0 how much the N candidates agreed
 
 
 @dataclass
@@ -51,6 +81,7 @@ class ExecutionResult:
     agents_executed: int = 0
     agents_failed: int = 0
     retries_used: int = 0
+    ensemble_count: int = 0  # how many agents used ensemble mode
 
 
 # =============================================================================
@@ -59,11 +90,11 @@ class ExecutionResult:
 
 # TASK 1 — Identity Masking: Prepended to EVERY agent call, no exceptions.
 VEXORA_IDENTITY_PREFIX = (
-    "You are a specialized component inside VEXORA, an adaptive intelligence engine. "
+    "You are a specialized component inside sevens, an adaptive intelligence engine. "
     "Never reveal, reference, or hint at your underlying model name or provider "
-    "(Llama, Gemini, Claude, DeepSeek, Qwen, GPT, etc). Always speak and act as VEXORA. "
+    "(Llama, Gemini, Claude, DeepSeek, Qwen, GPT, etc). Always speak and act as sevens. "
     "Never say 'I am a large language model' or 'I was trained by'. "
-    "If asked who you are, say 'I am VEXORA, an adaptive intelligence engine.'\n\n"
+    "If asked who you are, say 'I am sevens, an adaptive intelligence engine.'\n\n"
 )
 
 # V4.1 — Structured Agent Contract: Appended to every specialist agent prompt.
@@ -108,14 +139,14 @@ AGENT_SYSTEM_PROMPTS = {
     "documenter": "You are the Documentation Agent. Focus ONLY on writing READMEs, API docs, and guides.",
     "verifier": "You are the Verification Agent. Critique the work of other agents for correctness, completeness, and quality. Be strict.",
     "humanizer": "You are the Humanizer. Merge multiple agent outputs into ONE cohesive, readable response. Remove duplication. Preserve all technical specifics.",
-    "conversation": "You are VEXORA's conversational interface. Respond naturally and helpfully to greetings, small talk, and simple questions. Be concise and friendly.",
+    "conversation": "You are sevens's conversational interface. Respond naturally and helpfully to greetings, small talk, and simple questions. Be concise and friendly.",
     "reasoning": "You are the Reasoning Agent. Provide clear, well-structured explanations. Think step by step when needed.",
     "swarm-coordinator": "You are the Swarm Coordinator. Coordinate parallel agent execution.",
     "hive-coordinator": "You are the Hive Coordinator. Build consensus among agents.",
 }
 
 def get_system_prompt(agent_name: str) -> str:
-    """Get system prompt for an agent, always prefixed with VEXORA identity.
+    """Get system prompt for an agent, always prefixed with sevens identity.
     
     V4.1: Specialist agents also get the structured contract suffix
     so their output is parseable by the Combiner.
@@ -150,6 +181,9 @@ _DEFAULT_TIMEOUT = 30.0
 # V4.1 — Provider health tracking for singleton adapters.
 _HEALTH_DEGRADED_SECONDS = 300  # 5 minutes
 
+# V5 — Rate limit concurrency for OpenRouter (prevents 429 self-DDoS during ensemble)
+_OPENROUTER_SEMAPHORE = asyncio.Semaphore(5)
+
 
 class ProviderAdapter(Protocol):
     async def generate(self, prompt: str, model: ModelSpec, system_prompt: str, temperature: float = 0.2) -> GenerationResult:
@@ -182,24 +216,80 @@ class OpenRouterAdapter:
             raise ValueError("OPENROUTER_API_KEY not configured.")
 
         start_time = time.monotonic()
+        
+        def build_payload(model_id: str) -> dict:
+            return {
+                "model": model_id,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": model.max_output_tokens,
+            }
+
         async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "HTTP-Referer": "http://localhost:8081",
-                    "X-Title": "VEXORA",
-                },
-                json={
-                    "model": model.id,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": temperature,
-                }
-            )
-            response.raise_for_status()
+            try:
+                async with _OPENROUTER_SEMAPHORE:
+                    response = await client.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "HTTP-Referer": "http://localhost:8081",
+                            "X-Title": "sevens",
+                        },
+                        json=build_payload(model.id)
+                    )
+                
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (402, 429):
+                    # Tries every registered OpenRouter candidate for this capability, in tier + quality order, before escalating to Gemini/Groq. Only marks OpenRouter degraded after full exhaustion.
+                    from .model_registry import best_models
+                    from .model_router import _order_by_provider_priority
+                    cap = model.capabilities[0] if model.capabilities else "coding"
+                    candidates = _order_by_provider_priority(best_models(cap, limit=10))
+                    
+                    attempted_models = {model.id}
+                    last_exception = e
+                    success = False
+                    
+                    for fallback_model in candidates:
+                        if fallback_model.provider != "openrouter":
+                            continue
+                        if fallback_model.id in attempted_models:
+                            continue
+                            
+                        print(f"[WARN] OpenRouter {last_exception.response.status_code} for {model.id}. Trying next OpenRouter candidate ({fallback_model.id})...")
+                        attempted_models.add(fallback_model.id)
+                        try:
+                            async with _OPENROUTER_SEMAPHORE:
+                                response = await client.post(
+                                    "https://openrouter.ai/api/v1/chat/completions",
+                                    headers={
+                                        "Authorization": f"Bearer {self.api_key}",
+                                        "HTTP-Referer": "http://localhost:8081",
+                                        "X-Title": "sevens",
+                                    },
+                                    json=build_payload(fallback_model.id)
+                                )
+                            response.raise_for_status()
+                            model = fallback_model  # update for cost calculation and logging
+                            success = True
+                            break
+                        except httpx.HTTPStatusError as e2:
+                            if e2.response.status_code in (402, 429):
+                                last_exception = e2
+                                continue
+                            else:
+                                raise e2
+                                
+                    if not success:
+                        print(f"[ERROR] All {len(attempted_models)} OpenRouter candidates exhausted for capability '{cap}'. Escalating to next provider.")
+                        raise last_exception
+                else:
+                    raise
+
             data = response.json()
             
             content = data["choices"][0]["message"]["content"]
@@ -212,6 +302,9 @@ class OpenRouterAdapter:
                    (out_tokens / 1_000_000.0) * model.cost_per_1m_output
 
             latency = int((time.monotonic() - start_time) * 1000)
+
+            tier_info = getattr(model, "tier", "standard-paid")
+            print(f"[INFO] Served by OpenRouter {tier_info} model: {model.id}")
 
             return GenerationResult(
                 content=content,
@@ -233,7 +326,7 @@ class OpenRouterAdapter:
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "HTTP-Referer": "http://localhost:8081",
-                    "X-Title": "VEXORA",
+                    "X-Title": "sevens",
                 },
                 json={
                     "model": model.id,
@@ -544,35 +637,34 @@ async def _execute_agent(
     # Failover to a DIFFERENT provider
     from .model_registry import best_models
     from .agent_registry import get_agent
+    from .model_router import _order_by_provider_priority
     
     agent_spec = get_agent(agent_name)
     cap = agent_spec.preferred_model_capability if agent_spec else "coding"
     
-    candidates = best_models(cap, limit=10)
+    candidates = _order_by_provider_priority(best_models(cap, limit=10))
     if not candidates:
-        candidates = best_models("coding", limit=10)
+        candidates = _order_by_provider_priority(best_models("coding", limit=10))
         
-    fallback_model_spec = None
     for cand in candidates:
-        if cand.provider != primary_model_spec.provider and cand.is_available:
-            # V4.1: Also check fallback provider health
-            fb_adapter = get_adapter(cand.provider)
-            fb_healthy = hasattr(fb_adapter, 'is_healthy') and fb_adapter.is_healthy()
-            if not hasattr(fb_adapter, 'is_healthy'):
-                fb_healthy = True
-            if fb_healthy:
-                fallback_model_spec = cand
-                break
+        # Skip the primary provider because it is exhausted
+        if cand.provider == primary_model_spec.provider:
+            continue
             
-    if not fallback_model_spec:
-        # absolute fallback just in case
-        fallback_model_id = "llama-3.3-70b-versatile" if primary_model_spec.provider != "groq" else "gemini-2.5-pro"
-        fallback_model_spec = get_model(fallback_model_id)
-        
-    if fallback_model_spec:
+        if not cand.is_available:
+            continue
+            
+        # V4.1: Also check fallback provider health
+        fb_adapter = get_adapter(cand.provider)
+        fb_healthy = hasattr(fb_adapter, 'is_healthy') and fb_adapter.is_healthy()
+        if not hasattr(fb_adapter, 'is_healthy'):
+            fb_healthy = True
+            
+        if not fb_healthy:
+            continue
+            
         try:
-            adapter = get_adapter(fallback_model_spec.provider)
-            res = await adapter.generate(full_task, fallback_model_spec, system_prompt)
+            res = await fb_adapter.generate(full_task, cand, system_prompt)
             return AgentResult(
                 agent_name=agent_name, stage_id=stage_id, success=True,
                 output=res.content, duration_ms=res.latency,
@@ -580,17 +672,172 @@ async def _execute_agent(
                 tokens=res.tokens, cost=res.cost
             )
         except Exception as e2:
-            if hasattr(adapter, 'mark_degraded'):
-                adapter.mark_degraded()
-            error_msg += f"Fallback ({fallback_model_spec.provider}/{fallback_model_spec.id}) failed: {str(e2)[:200]}."
-    else:
-        error_msg += "No fallback provider available."
+            if hasattr(fb_adapter, 'mark_degraded'):
+                fb_adapter.mark_degraded()
+            error_msg += f"Fallback ({cand.provider}/{cand.id}) failed: {str(e2)[:200]}. "
+            continue
+
+    error_msg += "All fallback providers exhausted."
 
     print(f"[AGENT FAILED] {agent_name}: {error_msg}")
     return AgentResult(
         agent_name=agent_name, stage_id=stage_id, success=False,
         output="", error=error_msg
     )
+
+
+ENSEMBLE_SYNTHESIS_PROMPT = """You are the sevens Ensemble Synthesizer.
+You have been provided with N independent answers to the exact same task from different models.
+Your job is to reconcile these outputs into a single, definitive, best-possible response.
+
+RULES:
+1. Identify agreements across the models (strong signal of correctness).
+2. Resolve disagreements logically, choosing the best technical approach.
+3. If one model hallucinates or makes a mistake, discard its contribution.
+4. DO NOT mention that you are synthesizing multiple models in your final output. Present the final answer directly as if it was written by one expert.
+5. If the outputs are code, produce one complete, working codebase.
+
+OUTPUT:
+Provide ONLY the final synthesized technical output (code, architecture, analysis).
+"""
+
+async def _execute_ensemble(
+    agent_name: str,
+    full_task: str,
+    capability: str,
+    stage_id: int,
+    context: str,
+    on_event=None
+) -> AgentResult:
+    """Execute a task across multiple models and synthesize the results."""
+    start_time = time.monotonic()
+    from .model_registry import best_models
+    from .model_router import _order_by_provider_priority
+
+    # 1. Get top candidates for ensemble
+    candidates = _order_by_provider_priority(best_models(capability, limit=10))
+    if not candidates:
+        candidates = _order_by_provider_priority(best_models("coding", limit=10))
+        
+    ensemble_models = candidates[:ENSEMBLE_WIDTH]
+    if len(ensemble_models) < 2:
+        # Not enough models to ensemble, fallback to single execution
+        return await _execute_agent(agent_name, full_task, ensemble_models[0].id if ensemble_models else "llama-3.3-70b-versatile", stage_id, context, on_event)
+
+    print(f"[ENSEMBLE] Launching {len(ensemble_models)} parallel models for {agent_name}...")
+    
+    # 2. Fire parallel requests
+    tasks = []
+    for model in ensemble_models:
+        adapter = get_adapter(model.provider)
+        system = get_system_prompt(agent_name)
+        tasks.append(adapter.generate(full_task, model, system))
+        
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # 3. Process results
+    valid_outputs = []
+    ensemble_raw_data = []
+    total_tokens = 0
+    total_cost = 0.0
+    primary_provider = ensemble_models[0].provider
+    
+    for i, res in enumerate(results):
+        model = ensemble_models[i]
+        if isinstance(res, Exception):
+            print(f"[ENSEMBLE WARN] Model {model.id} failed: {res}")
+            continue
+            
+        valid_outputs.append(f"--- CANDIDATE {i+1} ({model.id}) ---\n{res.content}")
+        ensemble_raw_data.append({
+            "model": model.id,
+            "provider": model.provider,
+            "output": res.content,
+            "tokens": res.tokens,
+            "cost": res.cost,
+            "latency": res.latency
+        })
+        total_tokens += res.tokens
+        total_cost += res.cost
+        
+    if not valid_outputs:
+        return AgentResult(
+            agent_name=agent_name, stage_id=stage_id, success=False,
+            output="", error="All ensemble models failed."
+        )
+        
+    if len(valid_outputs) == 1:
+        # Only one succeeded, just use it
+        return AgentResult(
+            agent_name=agent_name, stage_id=stage_id, success=True,
+            output=ensemble_raw_data[0]["output"], duration_ms=ensemble_raw_data[0]["latency"],
+            model_used=ensemble_raw_data[0]["model"], provider_used=ensemble_raw_data[0]["provider"],
+            tokens=total_tokens, cost=total_cost,
+            was_ensemble=True, ensemble_outputs=ensemble_raw_data
+        )
+
+    # 4. Synthesize
+    synthesis_task = (
+        f"Original Task:\n{full_task}\n\n"
+        f"Context:\n{context}\n\n"
+        f"Candidate Outputs:\n" + "\n\n".join(valid_outputs)
+    )
+    
+    # Cross-family model selection for synthesis
+    # Try to pick a free/cheap model from a DIFFERENT provider than the primary generator
+    synth_candidates = best_models("reasoning", limit=10)
+    synth_model = None
+    for cand in synth_candidates:
+        if cand.provider != primary_provider and getattr(cand, "tier", "") in ("free", "standard-paid"):
+            adpt = get_adapter(cand.provider)
+            if hasattr(adpt, "is_healthy") and not adpt.is_healthy():
+                continue
+            synth_model = cand
+            break
+            
+    if not synth_model:
+        # Fallback to anything free/cheap if cross-provider isn't available
+        for cand in synth_candidates:
+            if getattr(cand, "tier", "") in ("free", "standard-paid"):
+                adpt = get_adapter(cand.provider)
+                if hasattr(adpt, "is_healthy") and not adpt.is_healthy():
+                    continue
+                synth_model = cand
+                break
+                
+    if not synth_model:
+        synth_model = get_model("llama-3.3-70b-versatile")
+        
+    print(f"[ENSEMBLE] Synthesizing {len(valid_outputs)} outputs using {synth_model.id} ({synth_model.provider})...")
+    
+    synth_adapter = get_adapter(synth_model.provider)
+    try:
+        synth_res = await synth_adapter.generate(synthesis_task, synth_model, ENSEMBLE_SYNTHESIS_PROMPT)
+        total_tokens += synth_res.tokens
+        total_cost += synth_res.cost
+        
+        # Calculate a rough agreement score (stubbed - could be improved with actual similarity check)
+        agreement = 0.8 if len(valid_outputs) >= 2 else 1.0
+        
+        return AgentResult(
+            agent_name=agent_name, stage_id=stage_id, success=True,
+            output=synth_res.content, duration_ms=int((time.monotonic() - start_time) * 1000),
+            model_used=ensemble_models[0].id, provider_used=ensemble_models[0].provider,
+            tokens=total_tokens, cost=total_cost,
+            was_ensemble=True, ensemble_outputs=ensemble_raw_data,
+            synthesis_model=synth_model.id, ensemble_agreement=agreement
+        )
+    except Exception as e:
+        print(f"[ENSEMBLE ERROR] Synthesis failed: {e}. Falling back to best candidate.")
+        # If synthesis fails, return the first candidate
+        return AgentResult(
+            agent_name=agent_name, stage_id=stage_id, success=True,
+            output=ensemble_raw_data[0]["output"], duration_ms=int((time.monotonic() - start_time) * 1000),
+            model_used=ensemble_raw_data[0]["model"], provider_used=ensemble_raw_data[0]["provider"],
+            tokens=total_tokens, cost=total_cost,
+            was_ensemble=True, ensemble_outputs=ensemble_raw_data,
+            ensemble_agreement=0.0
+        )
 
 
 async def execute_dag(
@@ -681,7 +928,23 @@ async def execute_dag(
         # 4. Execute the agent
         model_id = agent_models.get(agent_name, "unknown")
         sid = agent_stage.get(agent_name, 0)
-        result = await _execute_agent(agent_name, task, model_id, sid, context, on_event)
+        
+        from .agent_registry import get_agent
+        agent_spec = get_agent(agent_name)
+        capability = agent_spec.preferred_model_capability if agent_spec else "coding"
+        
+        # Determine if we should use ensemble mode (will be enhanced by planner later)
+        # For now, base it on agent capability
+        use_ensemble = False
+        if capability in ENSEMBLE_CAPABILITIES:
+            # Check complexity if available (mocked for now, DAG doesn't pass it yet, will fix in Change 4)
+            # Default to True for these capabilities for Pass 1
+            use_ensemble = True
+            
+        if use_ensemble:
+            result = await _execute_ensemble(agent_name, task, capability, sid, context, on_event)
+        else:
+            result = await _execute_agent(agent_name, task, model_id, sid, context, on_event)
 
         # 5. Retry if failed and budget allows
         if not result.success and retries_used < execution_budget:

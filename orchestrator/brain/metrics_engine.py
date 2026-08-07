@@ -1,5 +1,5 @@
 """
-VEXORA Metrics Engine — V3
+sevens Metrics Engine — V3
 
 Tracks operational telemetry across the entire orchestration pipeline:
 

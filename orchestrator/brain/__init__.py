@@ -1,1 +1,1 @@
-# VEXORA Orchestrator — brain package
+# sevens Orchestrator — brain package

@@ -1,5 +1,5 @@
 """
-VEXORA DAG Builder
+sevens DAG Builder
 
 Constructs a Directed Acyclic Graph (DAG) from the selected agent team.
 Parallelizes whenever possible. Respects dependency chains.

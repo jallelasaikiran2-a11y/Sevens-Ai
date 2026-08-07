@@ -102,21 +102,21 @@
   border: 1px solid var(--hairline);
 }
 
-@keyframes vexora-stream {
+@keyframes sevens-stream {
   0% { opacity: 0; transform: translateY(4px); }
   100% { opacity: 1; transform: translateY(0); }
 }
-@keyframes vexora-pulse {
+@keyframes sevens-pulse {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
-@keyframes vexora-slide-in {
+@keyframes sevens-slide-in {
   0% { opacity: 0; transform: translateX(16px); }
   100% { opacity: 1; transform: translateX(0); }
 }
 
 .vx-stream > * {
-  animation: vexora-stream 0.5s ease-out both;
+  animation: sevens-stream 0.5s ease-out both;
 }
 .vx-stream > *:nth-child(2) { animation-delay: 0.08s; }
 .vx-stream > *:nth-child(3) { animation-delay: 0.16s; }
@@ -125,7 +125,7 @@
 .vx-stream > *:nth-child(6) { animation-delay: 0.40s; }
 
 .vx-pulse {
-  animation: vexora-pulse 1.6s ease-in-out infinite;
+  animation: sevens-pulse 1.6s ease-in-out infinite;
 }
 
 .vx-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }

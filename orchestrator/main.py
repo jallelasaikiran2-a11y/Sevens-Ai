@@ -1,7 +1,7 @@
 """
-VEXORA Orchestrator — FastAPI Entry Point (V3)
+sevens Orchestrator — FastAPI Entry Point (V3)
 
-The brain of VEXORA Intelligence — Adaptive Intelligence Engine.
+The brain of Sevens ai — Adaptive Intelligence Engine.
 
 V3 Architecture:
     User → Planner → Capability Resolver → Registries → Execution Context Builder
@@ -12,7 +12,7 @@ Endpoints:
     POST /api/orchestrate       — Full execution (JSON response)
     POST /api/orchestrate/stream — SSE streaming execution
     POST /api/plan              — Dry-run: returns only the execution plan
-    GET  /api/agents            — Lists all available Ruflo agents
+    GET  /api/agents            — Lists all available Sevens agents
     GET  /api/models            — Lists all registered models
     GET  /api/health            — Health check
 """
@@ -73,9 +73,9 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="VEXORA Intelligence Orchestrator",
+    title="Sevens ai Orchestrator",
     lifespan=lifespan,
-    description="The brain of VEXORA Intelligence — Adaptive Intelligence Engine V3",
+    description="The brain of Sevens ai — Adaptive Intelligence Engine V3",
     version="3.0.0",
 )
 
@@ -367,6 +367,16 @@ async def _run_orchestration(prompt: str, on_event=None, session_id: str | None 
     # =========================================================================
     memory_stats = exec_context.execution_memory.summary_stats()
 
+    # Aggregate ensemble metrics
+    ensemble_used = False
+    ensemble_agreements = []
+    for stage_results in execution_result.stage_results:
+        for r in stage_results:
+            if getattr(r, "was_ensemble", False):
+                ensemble_used = True
+                ensemble_agreements.append(getattr(r, "ensemble_agreement", 1.0))
+    avg_ensemble_agreement = sum(ensemble_agreements) / len(ensemble_agreements) if ensemble_agreements else 1.0
+
     trust = compute_trust(
         verification_passed=verification.passed,
         verification_score=verification.score,
@@ -387,6 +397,8 @@ async def _run_orchestration(prompt: str, on_event=None, session_id: str | None 
         conflicts_resolved=combined_draft.conflicts_resolved,
         is_simple_chat=is_simple_chat,
         complexity=plan.complexity,
+        ensemble_used=ensemble_used,
+        ensemble_agreement=avg_ensemble_agreement,
     )
 
     # =========================================================================
@@ -407,7 +419,7 @@ async def _run_orchestration(prompt: str, on_event=None, session_id: str | None 
     for stage_results in execution_result.stage_results:
         for r in stage_results:
             agent_spec = get_agent(r.agent_name)
-            agents_used.append({
+            agent_dict = {
                 "name": r.agent_name,
                 "display_name": agent_spec.display_name if agent_spec else r.agent_name,
                 "model": r.model_used,
@@ -417,7 +429,14 @@ async def _run_orchestration(prompt: str, on_event=None, session_id: str | None 
                 "cost": r.cost,
                 "success": r.success,
                 "error": r.error,
-            })
+            }
+            if getattr(r, "was_ensemble", False):
+                agent_dict["was_ensemble"] = True
+                agent_dict["ensemble_outputs"] = r.ensemble_outputs
+                agent_dict["synthesis_model"] = r.synthesis_model
+                agent_dict["ensemble_agreement"] = r.ensemble_agreement
+                
+            agents_used.append(agent_dict)
 
     # Execution footer
     execution = []
@@ -552,7 +571,7 @@ def _build_dag_from_context(ctx: ExecutionContext) -> ExecutionDAG:
 async def health_check():
     return {
         "status": "healthy",
-        "service": "vexora-orchestrator",
+        "service": "sevens-orchestrator",
         "version": "3.0.0",
         "agents_registered": len(AGENTS),
         "models_registered": len(MODELS),
@@ -650,7 +669,7 @@ async def create_plan(request: PromptRequest):
 
 @app.get("/api/agents")
 async def list_agents_endpoint():
-    """List all available Ruflo agents and their capabilities."""
+    """List all available Sevens agents and their capabilities."""
     agents = list_all_agents()
     return {
         "total": len(agents),

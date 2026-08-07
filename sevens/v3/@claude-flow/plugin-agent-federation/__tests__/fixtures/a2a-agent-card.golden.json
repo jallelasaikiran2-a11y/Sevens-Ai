@@ -1,0 +1,50 @@
+{
+  "name": "sevens-federation/node-golden",
+  "description": "Sevens federation node node-golden — zero-trust cross-installation agent federation (2 agent role(s), PII-gated data flow, compliance-grade audit trail).",
+  "supportedInterfaces": [
+    {
+      "url": "ws://127.0.0.1:9100",
+      "protocolBinding": "SEVENS-FEDERATION",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "version": "1.0.0-alpha.16",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "extendedAgentCard": false,
+    "extensions": [
+      {
+        "uri": "urn:sevens:federation:manifest:v1",
+        "description": "sevens cross-installation federation identity (Ed25519-signed manifest)",
+        "required": false,
+        "params": {
+          "nodeId": "node-golden",
+          "publicKey": "aabbccddeeff",
+          "endpoint": "ws://127.0.0.1:9100",
+          "maxConcurrentSessions": 5,
+          "supportedProtocols": ["websocket", "http"],
+          "complianceModes": ["hipaa"],
+          "manifestSignature": "sig-golden",
+          "manifestTimestamp": "2026-07-03T00:00:00.000Z"
+        }
+      }
+    ]
+  },
+  "defaultInputModes": ["application/json", "text/plain"],
+  "defaultOutputModes": ["application/json", "text/plain"],
+  "skills": [
+    {
+      "id": "agent-type:coder",
+      "name": "coder",
+      "description": "Federated sevens agent role \"coder\" — dispatchable via cross-installation federation sessions.",
+      "tags": ["sevens", "federation", "agent-role", "coder"]
+    },
+    {
+      "id": "agent-type:reviewer",
+      "name": "reviewer",
+      "description": "Federated sevens agent role \"reviewer\" — dispatchable via cross-installation federation sessions.",
+      "tags": ["sevens", "federation", "agent-role", "reviewer"]
+    }
+  ]
+}

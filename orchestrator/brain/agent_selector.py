@@ -1,5 +1,5 @@
 """
-VEXORA Agent Selector
+sevens Agent Selector
 
 Matches capabilities → agents via the Agent Registry.
 

@@ -1,5 +1,5 @@
 """
-VEXORA Capability Resolver — V3
+sevens Capability Resolver — V3
 
 Sits between the Planner and the Registries.
 

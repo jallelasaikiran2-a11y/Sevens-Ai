@@ -1,5 +1,5 @@
 """
-VEXORA Research Engine — Real Web Search via Tavily API
+sevens Research Engine — Real Web Search via Tavily API
 
 Provides grounded retrieval for the Research Agent.
 Every response includes a `sources` array: [{title, url, snippet}].

@@ -1,0 +1,21 @@
+{
+  "name": "sevens-testgen",
+  "description": "Test gap detection, coverage analysis, and automated test generation — drives the testgaps background worker via hooks_worker-dispatch; SPARC Refinement-phase canonical owner",
+  "version": "0.2.1",
+  "author": {
+    "name": "ruvnet",
+    "url": "https://github.com/ruvnet"
+  },
+  "homepage": "https://github.com/ruvnet/sevens",
+  "license": "MIT",
+  "keywords": [
+    "sevens",
+    "testing",
+    "tdd",
+    "coverage",
+    "test-generation",
+    "mcp",
+    "tdd-london-school",
+    "coverage-routing"
+  ]
+}

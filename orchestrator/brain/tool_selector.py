@@ -1,7 +1,7 @@
 """
-VEXORA Tool Selector
+sevens Tool Selector
 
-Determines which Ruflo MCP tools each agent needs for its task.
+Determines which Sevens MCP tools each agent needs for its task.
 Only activates tools the task actually requires.
 """
 

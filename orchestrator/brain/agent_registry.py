@@ -1,7 +1,7 @@
 """
-VEXORA Agent Registry
+sevens Agent Registry
 
-Every Ruflo agent registers its capabilities here.
+Every Sevens agent registers its capabilities here.
 Adding a new agent = adding one entry. Zero code changes elsewhere.
 
 Flow:
@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AgentSpec:
-    """A single Ruflo specialized agent."""
-    name: str                        # Ruflo agent name (e.g. "backend-dev")
+    """A single Sevens specialized agent."""
+    name: str                        # Sevens agent name (e.g. "backend-dev")
     display_name: str                # Human-readable (e.g. "Backend Developer")
     capabilities: list[str]          # What this agent can do
     preferred_model_capability: str  # What model capability to look for (e.g. "coding")
@@ -28,7 +28,7 @@ class AgentSpec:
 
 
 # =============================================================================
-# THE REGISTRY — All Ruflo agents
+# THE REGISTRY — All Sevens agents
 # =============================================================================
 
 AGENTS: dict[str, AgentSpec] = {}

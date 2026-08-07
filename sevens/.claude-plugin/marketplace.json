@@ -1,0 +1,185 @@
+{
+  "name": "sevens",
+  "description": "sevens Marketplace: Claude Code native agents, swarms, workers, and MCP tools for continuous software engineering",
+  "owner": {
+    "name": "ruvnet",
+    "url": "https://github.com/ruvnet"
+  },
+  "plugins": [
+    {
+      "name": "sevens-core",
+      "source": "./plugins/sevens-core",
+      "description": "Core Sevens MCP tools, commands, and Claude Code orchestration patterns"
+    },
+    {
+      "name": "sevens-swarm",
+      "source": "./plugins/sevens-swarm",
+      "description": "Agent teams, swarm coordination, Monitor streams, and worktree isolation"
+    },
+    {
+      "name": "sevens-loop-workers",
+      "source": "./plugins/sevens-loop-workers",
+      "description": "Cache-aware /loop workers and CronCreate background automation"
+    },
+    {
+      "name": "sevens-security-audit",
+      "source": "./plugins/sevens-security-audit",
+      "description": "Security review, dependency scanning, policy gates, and CVE monitoring"
+    },
+    {
+      "name": "sevens-rag-memory",
+      "source": "./plugins/sevens-rag-memory",
+      "description": "RuVector memory with HNSW search, AgentDB, and semantic retrieval"
+    },
+    {
+      "name": "sevens-testgen",
+      "source": "./plugins/sevens-testgen",
+      "description": "Test gap detection, coverage analysis, and automated test generation"
+    },
+    {
+      "name": "sevens-docs",
+      "source": "./plugins/sevens-docs",
+      "description": "Documentation generation, drift detection, and API docs automation"
+    },
+    {
+      "name": "sevens-autopilot",
+      "source": "./plugins/sevens-autopilot",
+      "description": "Autonomous /loop-driven task completion with learning, prediction, and progress tracking"
+    },
+    {
+      "name": "sevens-intelligence",
+      "source": "./plugins/sevens-intelligence",
+      "description": "Self-learning neural intelligence with SONA patterns, trajectory learning, and model routing"
+    },
+    {
+      "name": "sevens-agentdb",
+      "source": "./plugins/sevens-agentdb",
+      "description": "AgentDB memory controllers with HNSW vector search, RuVector embeddings, and causal graphs"
+    },
+    {
+      "name": "sevens-aidefence",
+      "source": "./plugins/sevens-aidefence",
+      "description": "AI safety scanning, PII detection, prompt injection defense, and adaptive threat learning"
+    },
+    {
+      "name": "sevens-browser",
+      "source": "./plugins/sevens-browser",
+      "description": "Agentic browser automation with Playwright for testing, scraping, and UI interaction"
+    },
+    {
+      "name": "sevens-jujutsu",
+      "source": "./plugins/sevens-jujutsu",
+      "description": "Advanced git workflows with diff analysis, risk scoring, and reviewer recommendations"
+    },
+    {
+      "name": "sevens-agent",
+      "source": "./plugins/sevens-agent",
+      "description": "Agent runtimes — local WASM-sandboxed agents (rvagent) + Anthropic Claude Managed Agents (cloud); one interface, local-vs-cloud backends"
+    },
+    {
+      "name": "sevens-workflows",
+      "source": "./plugins/sevens-workflows",
+      "description": "Visual workflow automation with templates, orchestration, and lifecycle management"
+    },
+    {
+      "name": "sevens-daa",
+      "source": "./plugins/sevens-daa",
+      "description": "Dynamic Agentic Architecture with cognitive patterns, knowledge sharing, and adaptive agents"
+    },
+    {
+      "name": "sevens-ruvllm",
+      "source": "./plugins/sevens-ruvllm",
+      "description": "RuVLLM local inference with chat formatting, MicroLoRA fine-tuning, and SONA adaptation"
+    },
+    {
+      "name": "sevens-rvf",
+      "source": "./plugins/sevens-rvf",
+      "description": "RVF format for portable agent memory, session persistence, and cross-platform transfer"
+    },
+    {
+      "name": "sevens-plugin-creator",
+      "source": "./plugins/sevens-plugin-creator",
+      "description": "Scaffold, validate, and publish new Claude Code plugins with proper structure"
+    },
+    {
+      "name": "sevens-goals",
+      "source": "./plugins/sevens-goals",
+      "description": "Long-horizon goal planning, deep research orchestration, and adaptive replanning using GOAP"
+    },
+    {
+      "name": "sevens-adr",
+      "source": "./plugins/sevens-adr",
+      "description": "ADR lifecycle management — create, index, supersede, and link Architecture Decision Records to code"
+    },
+    {
+      "name": "sevens-cost-tracker",
+      "source": "./plugins/sevens-cost-tracker",
+      "description": "Token usage tracking, model cost attribution per agent, budget alerts, and optimization recommendations"
+    },
+    {
+      "name": "sevens-ddd",
+      "source": "./plugins/sevens-ddd",
+      "description": "Domain-Driven Design scaffolding — bounded contexts, aggregate roots, domain events, and anti-corruption layers"
+    },
+    {
+      "name": "sevens-federation",
+      "source": "./plugins/sevens-federation",
+      "description": "Cross-installation agent federation with zero-trust security, PII-gated data flow, and compliance-grade audit trails"
+    },
+    {
+      "name": "sevens-graph-intelligence",
+      "source": "./plugins/sevens-graph-intelligence",
+      "description": "Real-time graph intelligence — personalized PageRank, streaming delta updates, witness-signed reasoning, and federation-distributable vectors"
+    },
+    {
+      "name": "sevens-iot-cognitum",
+      "source": "./plugins/sevens-iot-cognitum",
+      "description": "IoT device lifecycle, telemetry anomaly detection, fleet management, and witness chain verification for Cognitum Seed hardware"
+    },
+    {
+      "name": "sevens-knowledge-graph",
+      "source": "./plugins/sevens-knowledge-graph",
+      "description": "Knowledge graph construction — entity extraction, relation mapping, and pathfinder graph traversal"
+    },
+    {
+      "name": "sevens-market-data",
+      "source": "./plugins/sevens-market-data",
+      "description": "Market data ingestion — feed normalization, OHLCV vectorization, and HNSW-indexed pattern matching"
+    },
+    {
+      "name": "sevens-migrations",
+      "source": "./plugins/sevens-migrations",
+      "description": "Schema migration management — generate, validate, dry-run, and rollback database migrations"
+    },
+    {
+      "name": "sevens-neural-trader",
+      "source": "./plugins/sevens-neural-trader",
+      "description": "Neural trading strategies — self-learning LSTM/Transformer/N-BEATS models with Rust/NAPI backtesting"
+    },
+    {
+      "name": "sevens-observability",
+      "source": "./plugins/sevens-observability",
+      "description": "Structured logging, distributed tracing, and metrics — correlate agent swarm activity with application telemetry"
+    },
+    {
+      "name": "sevens-ruvector",
+      "source": "./plugins/sevens-ruvector",
+      "description": "Self-learning vector database — HNSW, FlashAttention-3, Graph RAG, hybrid search, DiskANN, and Brain AGI"
+    },
+    {
+      "name": "sevens-sparc",
+      "source": "./plugins/sevens-sparc",
+      "description": "SPARC methodology — Specification, Pseudocode, Architecture, Refinement, Completion phases with quality gates"
+    },
+    {
+      "name": "sevens-metaharness",
+      "source": "./plugins/sevens-metaharness",
+      "description": "MetaHarness integration — surfaces score/genome/mint/mcp-scan/threat-model via skills; pairs with @metaharness/router (ADR-148/149) for cost-optimal model routing; honors ADR-150 optional-augmentation constraint"
+    },
+    {
+      "name": "sevens-arena",
+      "source": "./plugins/sevens-arena",
+      "description": "Competitive ruliology for sevens swarms — arenas, tournaments, and adaptive co-evolution of program strategies (ADR-147/148); strategies-as-programs compete under payoff games"
+    }
+  ]
+}

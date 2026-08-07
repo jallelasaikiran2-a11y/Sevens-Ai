@@ -1,5 +1,5 @@
 """
-VEXORA Layered Verifier — V2
+sevens Layered Verifier — V2
 
 Layer 1 (Default — Executable Ground Truth):
   - Code syntax: ast.parse (Python), regex checks for other langs

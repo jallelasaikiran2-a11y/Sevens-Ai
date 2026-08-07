@@ -1,5 +1,5 @@
 """
-VEXORA Combiner — V3
+sevens Combiner — V3
 
 Structurally merges distinct agent outputs into one coherent draft
 before verification.

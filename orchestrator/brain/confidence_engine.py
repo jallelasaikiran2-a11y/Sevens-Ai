@@ -1,5 +1,5 @@
 """
-VEXORA Confidence & Trust Engine — V3
+sevens Confidence & Trust Engine — V3
 
 Replaces the V2 single-number confidence score with a multi-dimensional
 trust assessment that explains WHY a response should (or shouldn't) be trusted.
@@ -32,7 +32,7 @@ class TrustFactor:
 
 @dataclass
 class TrustAssessment:
-    """Complete trust assessment for a VEXORA response."""
+    """Complete trust assessment for a sevens response."""
     overall_confidence: int              # 0-100
     trust_factors: list[TrustFactor]
     summary: str                         # Human-readable overall summary
@@ -74,6 +74,10 @@ def compute_trust(
     # Task
     is_simple_chat: bool = False,
     complexity: int = 2,
+
+    # V5 Ensemble (Fugu-style MoA)
+    ensemble_used: bool = False,
+    ensemble_agreement: float = 1.0,
 ) -> TrustAssessment:
     """
     Compute a multi-dimensional trust assessment.
@@ -185,6 +189,18 @@ def compute_trust(
         weight=0.10,
         explanation=e_explanation,
     ))
+
+    # --- 5.5 Ensemble Agreement (V5 MoA) ---
+    if ensemble_used:
+        ea_score = ensemble_agreement
+        ea_explanation = f"Ensemble synthesis agreement: {ensemble_agreement:.0%}"
+        factors.append(TrustFactor(
+            name="Ensemble Agreement",
+            score=ea_score,
+            weight=0.20,
+            explanation=ea_explanation,
+            severity="info" if ea_score >= 0.8 else "warning",
+        ))
 
     # --- 6. Cross-Agent Agreement ---
     if agents_executed > 1:

@@ -1,5 +1,5 @@
 """
-VEXORA Adaptive Planner — V3
+sevens Adaptive Planner — V3
 
 The Planner is a pure intent analyzer. It is completely model-agnostic
 and agent-agnostic. It NEVER references specific agents, models, or tools.
@@ -57,56 +57,10 @@ class PlanOutput:
 
 
 # =============================================================================
-# Fast-Path Detection (Level 0 — No LLM call needed)
+# LLM-Based Planning (Level 2-4)
 # =============================================================================
 
-GREETING_PATTERNS = [
-    "hello", "hi", "hey", "how are you", "what's up", "good morning",
-    "good evening", "good afternoon", "thanks", "thank you", "bye",
-    "goodbye", "help", "who are you", "what are you", "what can you do",
-]
-
-IDENTITY_PATTERNS = [
-    "who are you", "what are you", "your name", "what is vexora",
-    "tell me about yourself", "introduce yourself",
-]
-
-
-def _is_fast_path(prompt: str) -> bool:
-    """Check if prompt is Level 0 (greeting/small talk/identity)."""
-    lower = prompt.lower().strip()
-    if len(lower.split()) <= 8:
-        for pattern in GREETING_PATTERNS:
-            if pattern in lower:
-                return True
-    return False
-
-
-def _fast_path_plan(prompt: str) -> PlanOutput:
-    """Generate a Level 0 plan without any LLM call."""
-    is_identity = any(p in prompt.lower() for p in IDENTITY_PATTERNS)
-
-    return PlanOutput(
-        intent="Identity" if is_identity else "Conversation",
-        complexity=0,
-        confidence=0.99,
-        reasoning="Simple greeting/identity — fast path, no orchestration needed",
-        capabilities=["conversation"],
-        constraints=[],
-        required_outputs=["text"],
-        missing_information=[],
-        needs_clarification=False,
-        clarification_questions=[],
-        planner_latency_ms=0,
-        planning_path="fast_path",
-    )
-
-
-# =============================================================================
-# LLM-Based Planning (Level 1-4)
-# =============================================================================
-
-PLANNER_SYSTEM_PROMPT = """You are the VEXORA Planning Intelligence Engine.
+PLANNER_SYSTEM_PROMPT = """You are the sevens Planning Intelligence Engine.
 You NEVER answer the user's question. You ONLY analyze intent and output a plan as JSON.
 
 Your job: Analyze the user's request and determine:
@@ -147,15 +101,32 @@ Return ONLY the JSON object. No markdown, no explanation, no code fences."""
 async def generate_plan(prompt: str) -> PlanOutput:
     """
     Generate an execution plan for the given prompt.
-    Uses fast-path for Level 0, LLM planning for Level 1-4.
+    Uses Fast Intent Router for Level 0-1, LLM planning for Level 2-4.
     """
-    # Fast path for greetings
-    if _is_fast_path(prompt):
-        return _fast_path_plan(prompt)
-
-    # LLM-based planning via Groq with fallbacks
     start = time.monotonic()
+    
+    # 1. Fast Intent Router (Deterministic & < 5ms)
+    from .capability_analyzer import analyze
+    analysis = analyze(prompt)
+    
+    if analysis.complexity == "Low":
+        planner_latency = int((time.monotonic() - start) * 1000)
+        return PlanOutput(
+            intent=analysis.intent,
+            complexity=1 if "reasoning" in analysis.capabilities else 0,
+            confidence=0.99,
+            reasoning="Fast Intent Router bypassed LLM planning (Low Complexity).",
+            capabilities=analysis.capabilities,
+            constraints=[],
+            required_outputs=["text"],
+            missing_information=[],
+            needs_clarification=False,
+            clarification_questions=[],
+            planner_latency_ms=planner_latency,
+            planning_path="fast_intent_router",
+        )
 
+    # 2. LLM-based planning via Groq with fallbacks (Level 2-4)
     try:
         plan_json, planning_path = await _call_planner_llm(prompt)
     except Exception as e:

@@ -1,14 +1,13 @@
 """
-VEXORA Model Registry — Dynamic Model Catalog
+sevens Model Registry — V3
 
-Never hardcode model names. This registry is the single source of truth
-for every model the orchestrator can use. When a new model launches on
-OpenRouter or Gemini, add it here — zero code changes anywhere else.
+Single source of truth for all LLM models known to the system.
+The rest of the system queries this registry by capability, never by hardcoded name.
 
-The router asks:
-    best_models("coding")
-instead of:
-    return "deepseek-chat"
+IMPORTANT: OpenRouter free-credit promotions for new accounts and the availability
+of `:free` models change over time. This list (specifically Tier 1 vs Tier 2 models)
+should be periodically re-verified against https://openrouter.ai/models to ensure
+the fallback strategy remains cost-effective.
 """
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ class ModelSpec:
     cost_per_1m_output: float = 0.0  # USD per 1M output tokens
     speed_tier: int = 2              # 1=fast, 2=balanced, 3=slow-but-powerful
     quality_tier: int = 2            # 1=basic, 2=good, 3=best
+    tier: str = "standard-paid"      # "paid-trial" | "free" | "standard-paid"
     is_available: bool = True        # Can be toggled off without removal
     max_output_tokens: int = 8192
     supports_streaming: bool = True
@@ -51,32 +51,7 @@ def _register(spec: ModelSpec) -> None:
 # OpenRouter models
 # ---------------------------------------------------------------------------
 
-_register(ModelSpec(
-    id="deepseek/deepseek-r1",
-    provider="openrouter",
-    name="DeepSeek R1 (Reasoner)",
-    capabilities=["reasoning", "architecture", "security", "coding", "analysis"],
-    context_window=128_000,
-    cost_per_1m_input=0.55,
-    cost_per_1m_output=2.19,
-    speed_tier=3,
-    quality_tier=3,
-    tags=["deep-reasoning", "open-source"],
-))
-
-_register(ModelSpec(
-    id="deepseek/deepseek-chat",
-    provider="openrouter",
-    name="DeepSeek V3 Chat",
-    capabilities=["coding", "review", "implementation", "optimization", "analysis"],
-    context_window=128_000,
-    cost_per_1m_input=0.27,
-    cost_per_1m_output=1.10,
-    speed_tier=2,
-    quality_tier=3,
-    tags=["cost-effective", "open-source"],
-))
-
+# GENERAL
 _register(ModelSpec(
     id="google/gemini-2.5-flash",
     provider="openrouter",
@@ -87,10 +62,55 @@ _register(ModelSpec(
     cost_per_1m_output=0.60,
     speed_tier=1,
     quality_tier=2,
+    tier="paid-trial",
     supports_vision=True,
     tags=["fast", "cost-effective"],
 ))
 
+_register(ModelSpec(
+    id="openai/gpt-oss-20b:free",
+    provider="openrouter",
+    name="GPT OSS 20B (Free)",
+    capabilities=["general", "writing", "documentation"],
+    context_window=8192,
+    cost_per_1m_input=0.0,
+    cost_per_1m_output=0.0,
+    speed_tier=1,
+    quality_tier=1,
+    tier="free",
+    tags=["free", "general"],
+))
+
+# REASONING
+_register(ModelSpec(
+    id="deepseek/deepseek-r1",
+    provider="openrouter",
+    name="DeepSeek R1 (Reasoner)",
+    capabilities=["reasoning", "architecture", "security", "coding", "analysis"],
+    context_window=128_000,
+    cost_per_1m_input=0.55,
+    cost_per_1m_output=2.19,
+    speed_tier=3,
+    quality_tier=3,
+    tier="paid-trial",
+    tags=["deep-reasoning", "open-source"],
+))
+
+_register(ModelSpec(
+    id="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    provider="openrouter",
+    name="Nemotron 3 Nano Reasoning (Free)",
+    capabilities=["reasoning", "analysis", "architecture"],
+    context_window=32768,
+    cost_per_1m_input=0.0,
+    cost_per_1m_output=0.0,
+    speed_tier=2,
+    quality_tier=1,
+    tier="free",
+    tags=["free", "reasoning"],
+))
+
+# CODING
 _register(ModelSpec(
     id="qwen/qwen-2.5-coder-32b-instruct",
     provider="openrouter",
@@ -101,9 +121,25 @@ _register(ModelSpec(
     cost_per_1m_output=0.20,
     speed_tier=2,
     quality_tier=2,
+    tier="paid-trial",
     tags=["code-specialist", "open-source"],
 ))
 
+_register(ModelSpec(
+    id="cohere/north-mini-code:free",
+    provider="openrouter",
+    name="Cohere North Mini Code (Free)",
+    capabilities=["coding", "review", "debugging", "refactoring"],
+    context_window=32768,
+    cost_per_1m_input=0.0,
+    cost_per_1m_output=0.0,
+    speed_tier=2,
+    quality_tier=1,
+    tier="free",
+    tags=["free", "code-specialist"],
+))
+
+# RESEARCH
 _register(ModelSpec(
     id="meta-llama/llama-4-maverick",
     provider="openrouter",
@@ -114,20 +150,22 @@ _register(ModelSpec(
     cost_per_1m_output=0.60,
     speed_tier=2,
     quality_tier=2,
+    tier="paid-trial",
     tags=["open-source", "long-context"],
 ))
 
 _register(ModelSpec(
-    id="microsoft/mai-ds-r1",
+    id="google/gemma-4-31b-it:free",
     provider="openrouter",
-    name="Microsoft MAI DS R1",
-    capabilities=["reasoning", "analysis", "coding", "architecture"],
-    context_window=131_072,
+    name="Gemma 4 31B IT (Free)",
+    capabilities=["research", "analysis", "documentation"],
+    context_window=16384,
     cost_per_1m_input=0.0,
     cost_per_1m_output=0.0,
     speed_tier=2,
-    quality_tier=2,
-    tags=["free", "reasoning"],
+    quality_tier=1,
+    tier="free",
+    tags=["free", "research"],
 ))
 
 # ---------------------------------------------------------------------------

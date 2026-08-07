@@ -1,5 +1,5 @@
 """
-VEXORA Conditional Humanizer — V2
+sevens Conditional Humanizer — V2
 
 Rules:
   - If only 1 agent produced output → return it directly (no LLM call).
@@ -87,7 +87,7 @@ def _extract_agent_sections(combined: str) -> dict[str, str]:
 
 # V4.1 — Editorial Engine system prompt (strict preservation constraints)
 _HUMANIZER_SYSTEM = (
-    "You are VEXORA's Editorial Engine — an elite technical editor.\n"
+    "You are sevens's Editorial Engine — an elite technical editor.\n"
     "Your ONLY job is presentation. Merge and polish the agent outputs below into ONE cohesive, readable response.\n\n"
     "RULES:\n"
     "✓ Professional, natural writing with smooth transitions\n"
@@ -213,7 +213,7 @@ async def humanize_stream(combined_output: str, task: str, agent_count: int = 1)
 def humanize_plan(plan: dict) -> str:
     """Format an execution plan (dry-run) as readable markdown."""
     lines = []
-    lines.append("# VEXORA Orchestration Plan\n")
+    lines.append("# sevens Orchestration Plan\n")
     lines.append(f"> **Task:** {plan.get('task', 'N/A')}\n")
     lines.append(f"**Total Agents:** {plan.get('total_agents', 0)}")
     lines.append(f"**Estimated Duration:** {plan.get('estimated_duration_seconds', 0)}s\n")
@@ -237,11 +237,33 @@ def humanize_plan(plan: dict) -> str:
     return "\n".join(lines)
 
 
+def _strip_internal_contract(content: str) -> str:
+    """
+    Remove the Sevens agent contract metadata from the output.
+    Finds the last occurrence of '## Handoff Notes' and returns everything after it.
+    """
+    marker = "## Handoff Notes"
+    if marker in content:
+        parts = content.split(marker)
+        # The actual answer is everything after the handoff notes section
+        # Handoff notes might have content below it, so we split by double newline
+        # to skip the handoff notes content.
+        after_marker = parts[-1].strip()
+        # Find the first blank line after the marker content to start the real answer
+        if "\n\n" in after_marker:
+            return after_marker.split("\n\n", 1)[1].strip()
+        return after_marker.strip()
+    return content
+
 def _clean_output(output: str) -> str:
     """Clean and normalize agent output for readability."""
     # Remove ANSI escape codes
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     cleaned = ansi_escape.sub('', output)
+    
+    # Strip internal contract headers if they leaked
+    cleaned = _strip_internal_contract(cleaned)
+    
     # Remove excessive blank lines
     cleaned = re.sub(r'\n{4,}', '\n\n\n', cleaned)
     # Remove common CLI noise

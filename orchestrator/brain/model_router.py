@@ -1,5 +1,5 @@
 """
-VEXORA Model Router
+sevens Model Router
 
 Dynamically selects the BEST model for each agent by querying the Model Registry.
 
@@ -102,6 +102,7 @@ def _order_by_provider_priority(models: list[ModelSpec]) -> list[ModelSpec]:
     """
     Re-order models by provider priority while preserving quality ranking
     within each provider group.
+    For OpenRouter specifically, prioritize paid-trial models over free models.
     """
     buckets: dict[str, list[ModelSpec]] = {p: [] for p in PROVIDER_PRIORITY}
     other: list[ModelSpec] = []
@@ -113,6 +114,19 @@ def _order_by_provider_priority(models: list[ModelSpec]) -> list[ModelSpec]:
             other.append(m)
 
     result: list[ModelSpec] = []
+    
+    # Sort OpenRouter bucket specifically by tier
+    if buckets.get("openrouter"):
+        # Map tier to sort order (lower is better):
+        # 1. paid-trial
+        # 2. standard-paid
+        # 3. free
+        def _tier_sort_key(m: ModelSpec) -> tuple[int, int, float]:
+            tier_order = {"paid-trial": 0, "standard-paid": 1, "free": 2}
+            return (tier_order.get(getattr(m, "tier", "standard-paid"), 1), -m.quality_tier, m.cost_per_1m_input)
+            
+        buckets["openrouter"].sort(key=_tier_sort_key)
+
     for provider in PROVIDER_PRIORITY:
         result.extend(buckets[provider])
     result.extend(other)

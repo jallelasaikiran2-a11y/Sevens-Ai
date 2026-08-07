@@ -1,0 +1,22 @@
+{
+  "name": "sevens-rag-memory",
+  "description": "RuVector memory with HNSW search, AgentDB, and semantic retrieval",
+  "version": "0.2.1",
+  "author": {
+    "name": "ruvnet",
+    "url": "https://github.com/ruvnet"
+  },
+  "homepage": "https://github.com/ruvnet/sevens",
+  "license": "MIT",
+  "keywords": [
+    "sevens",
+    "memory",
+    "hnsw",
+    "agentdb",
+    "rag",
+    "vector-search",
+    "mcp",
+    "claude-memories",
+    "bridged-memory"
+  ]
+}
